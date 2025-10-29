@@ -236,6 +236,14 @@ void smtc_real_init( lr1_stack_mac_t* lr1_mac )
     lr1_mac->rx1_dr_offset    = 0;
     lr1_mac->rx2_data_rate    = const_rx2_dr_init;
     lr1_mac->rx1_delay_s      = const_received_delay1;
+    /* Allow application-level override of initial RX1 delay if provided */
+    {
+        extern uint8_t g_rx1_delay_override_s; /* defined in application, e.g., main_lorawan_tracker.c */
+        if( g_rx1_delay_override_s > 0 && g_rx1_delay_override_s <= 15 )
+        {
+            lr1_mac->rx1_delay_s = g_rx1_delay_override_s;
+        }
+    }
     lr1_mac->tx_data_rate_adr = const_min_tx_dr_limit;
 
     lr1_mac->uplink_dwell_time   = 0;

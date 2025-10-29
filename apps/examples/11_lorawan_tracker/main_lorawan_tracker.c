@@ -47,6 +47,14 @@
  * --- PRIVATE VARIABLES -------------------------------------------------------
  */
 
+/*
+ * Override the default LoRaWAN RX1 delay (seconds).
+ * If non-zero, the LoRaWAN stack will use this value as the initial RX1 delay
+ * instead of its regional default. The network may still update it later via
+ * RxTimingSetupReq.
+ */
+uint8_t g_rx1_delay_override_s = 4; // set RX1 delay to 4 seconds
+
 /*!
  * @brief Stack identifier
  */
