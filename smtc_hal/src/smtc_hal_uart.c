@@ -7,6 +7,8 @@
 #include "smtc_hal_uart.h"
 #include "smtc_hal_config.h"
 #include "smtc_hal_gpio.h"
+#include "smtc_hal_mcu.h"
+#include "ag3335.h"
 
 static void uart0_handleEvent( app_uart_evt_t *pEvent );
 static void uart1_handleEvent( app_uart_evt_t *pEvent );
@@ -164,8 +166,12 @@ void hal_uart_1_tx( uint8_t *buff, uint16_t len )
 {
     if( uart_1_init == true )
     {
-        nrf_drv_uart_tx( &uart1, buff, len );
-        hal_mcu_wait_us( len * 100 );
+        for( uint16_t i = 0; i < len; i++ )
+        {
+            app_uart_put( &uart1, buff[i] );
+        }
+        // Small delay to allow FIFO to drain
+        hal_mcu_wait_us( (uint32_t) len * 100 );
     }
 }
 
