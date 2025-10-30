@@ -11,6 +11,7 @@
 #include "smtc_hal.h"
 #include "smtc_modem_api_str.h"
 #include "lr1mac_defs.h"
+#include "lr1mac_utilities.h"
 
 #include "app_config_param.h"
 
