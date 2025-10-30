@@ -3,6 +3,7 @@
 #include <stdbool.h>  // bool type
 #include <string.h>
 #include "smtc_hal_uart.h"
+#include "smtc_hal_usb_cdc.h"
 #include "smtc_hal_trace.h"
 
 #define PRINT_BUFFER_SIZE 256
