@@ -47,6 +47,7 @@ extern "C" {
 
 #include "smtc_hal_options.h"
 #include "smtc_hal_mcu.h"
+#include "smtc_hal_trace.h"
 
 /*
  * -----------------------------------------------------------------------------

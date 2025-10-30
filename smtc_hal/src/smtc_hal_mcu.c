@@ -3,13 +3,17 @@
 #include "nrf52840.h"
 #include "smtc_hal.h"
 #include "nrf_pwr_mgmt.h"
+#include "nrf_drv_clock.h"
 #include "smtc_hal_rtc.h"
 
 #include <stdarg.h>
 #include <string.h>
+#include <stdlib.h>
 #include <stdio.h>
 
 #include "hardfault.h"
+#include "app_led.h"
+#include "app_user_timer.h"
 
 static bool m_sleep_enable = false;
 static uint32_t m_usb_detect = false;
