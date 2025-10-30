@@ -26,6 +26,7 @@
 #include "app_button.h"
 #include "app_led.h"
 #include "app_beep.h"
+#include "app_timer.h"
 
 /*
  * -----------------------------------------------------------------------------
@@ -554,7 +555,9 @@ static void on_modem_network_joined( void )
         case SMTC_MODEM_REGION_RU_864:
             if( duty_cycle_enable == false )
             {
-                smtc_modem_set_region_duty_cycle( stack_id, false );
+                // Disable regional duty-cycle if supported. The API smtc_modem_set_region_duty_cycle is not available
+                // in the current LBM version, so rely on the host-side flag only.
+                // smtc_modem_set_region_duty_cycle( stack_id, false );
                 modem_set_duty_cycle_disabled_by_host( true );
             }
         break;
