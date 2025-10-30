@@ -1,0 +1,11 @@
+# macOS
+.DS_Store
+
+# Segger Embedded Studio build output
+pca10056/s140/11_ses_lorawan_tracker/Output/
+
+# Segger session files (user-specific)
+*.emSession
+
+# Python cache (tools)
+__pycache__/
