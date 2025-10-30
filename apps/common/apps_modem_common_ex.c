@@ -11,7 +11,14 @@
 #include "smtc_hal.h"
 #include "smtc_modem_api_str.h"
 #include "lr1mac_defs.h"
+#ifdef MIN
+#undef MIN
+#endif
+#ifdef MAX
+#undef MAX
+#endif
 #include "lr1mac_utilities.h"
+#include "modem_context.h"
 
 #include "app_config_param.h"
 
