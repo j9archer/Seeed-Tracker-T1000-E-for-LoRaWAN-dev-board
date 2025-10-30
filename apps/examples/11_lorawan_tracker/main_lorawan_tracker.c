@@ -27,6 +27,7 @@
 #include "app_led.h"
 #include "app_beep.h"
 #include "app_timer.h"
+#include "wifi_scan.h"
 
 /*
  * -----------------------------------------------------------------------------
@@ -555,10 +556,8 @@ static void on_modem_network_joined( void )
         case SMTC_MODEM_REGION_RU_864:
             if( duty_cycle_enable == false )
             {
-                // Disable regional duty-cycle if supported. The API smtc_modem_set_region_duty_cycle is not available
-                // in the current LBM version, so rely on the host-side flag only.
-                // smtc_modem_set_region_duty_cycle( stack_id, false );
-                modem_set_duty_cycle_disabled_by_host( true );
+                // Intentionally left blank: public API for disabling regional duty-cycle is not available here.
+                // If needed later, handle via modem configuration or network-side settings.
             }
         break;
 
@@ -630,7 +629,7 @@ static void on_modem_down_data( int8_t rssi, int8_t snr, smtc_modem_event_downda
 
         if( port == LORAWAN_APP_PORT )
         {
-            app_lora_packet_downlink_decode( payload, size );
+            app_lora_packet_downlink_decode( (uint8_t*) payload, size );
         }
     }
 }
