@@ -54,6 +54,18 @@
  * --- PUBLIC FUNCTIONS DEFINITION ---------------------------------------------
  */
 
+static bool is_all_zero( const uint8_t* buf, size_t len )
+{
+    for( size_t i = 0; i < len; i++ )
+    {
+        if( buf[i] != 0 )
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 void apps_modem_common_configure_lorawan_params( uint8_t stack_id )
 {
     smtc_modem_return_code_t rc = SMTC_MODEM_RC_OK;
@@ -160,6 +172,20 @@ void apps_modem_common_configure_lorawan_params( uint8_t stack_id )
 
     if( activation_mode == ACTIVATION_MODE_OTAA )
     {
+        // Fallback: if any OTAA credential is all-zero, load from lorawan_key_config.h macros
+        if( is_all_zero( dev_eui, sizeof( dev_eui ) ) )
+        {
+            hal_hex_to_bin( LORAWAN_DEVICE_EUI, dev_eui, sizeof( dev_eui ) );
+        }
+        if( is_all_zero( join_eui, sizeof( join_eui ) ) )
+        {
+            hal_hex_to_bin( LORAWAN_JOIN_EUI, join_eui, sizeof( join_eui ) );
+        }
+        if( is_all_zero( app_key, sizeof( app_key ) ) )
+        {
+            hal_hex_to_bin( LORAWAN_APP_KEY, app_key, sizeof( app_key ) );
+        }
+
         rc = smtc_modem_set_deveui( stack_id, dev_eui );
         if( rc != SMTC_MODEM_RC_OK )
         {
