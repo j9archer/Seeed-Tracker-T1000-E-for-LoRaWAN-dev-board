@@ -1,9 +1,14 @@
 
 #include "smtc_hal.h"
+// Silence redefinition warning and keep local buffer size choice
+#ifdef MINMEA_MAX_SENTENCE_LENGTH
+#undef MINMEA_MAX_SENTENCE_LENGTH
+#endif
 #include "minmea.h"
 
 #define GPS_INFO_PRINTF false
 
+// Local parsing buffer size
 #define MINMEA_MAX_SENTENCE_LENGTH  128
 static char gps_nmea_line[MINMEA_MAX_SENTENCE_LENGTH] = { 0 };
 

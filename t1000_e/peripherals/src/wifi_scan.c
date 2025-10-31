@@ -1,5 +1,6 @@
 
 #include "ralf.h"
+#include "lr11xx_system.h"
 #include "smtc_modem_hal.h"
 #include "wifi_helpers.h"
 #include "smtc_hal_dbg_trace.h"
