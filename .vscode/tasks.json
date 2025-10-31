@@ -4,7 +4,7 @@
 		{
 			"label": "Build Tracker (SES emBuild)",
 			"type": "shell",
-			"command": "emBuild",
+			"command": "\"/Applications/SEGGER/SEGGER Embedded Studio 8.24/bin/emBuild\"",
 			"args": [
 				"pca10056/s140/11_ses_lorawan_tracker/t1000_e_dev_kit_pca10056.emProject",
 				"-config",

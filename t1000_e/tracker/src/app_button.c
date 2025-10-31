@@ -4,7 +4,8 @@
 #include "app_led.h"
 #include "app_beep.h"
 #include "app_button.h"
-#include "main_lorawan_tracker.h"
+#include "main_lorawan_tracker_api.h"
+#include "app_ble_all.h"
 #include "smtc_modem_api.h"
 
 APP_TIMER_DEF(m_button_event_timer_id);

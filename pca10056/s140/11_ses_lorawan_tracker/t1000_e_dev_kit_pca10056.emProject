@@ -126,6 +126,7 @@
       <file file_name="../../../smtc_hal/src/smtc_hal_usb_time.c" />
       <file file_name="../../../smtc_hal/src/smtc_hal_mcu.c" />
       <file file_name="../../../smtc_hal/src/smtc_hal_usb_cdc.c" />
+      <file file_name="../../../smtc_hal/src/segger_rtl_stubs.c" />
     </folder>
     <folder Name="LBM_common">
       <file file_name="../../../apps/common/apps_utilities.c" />

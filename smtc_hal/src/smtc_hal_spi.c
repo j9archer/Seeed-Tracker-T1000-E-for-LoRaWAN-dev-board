@@ -3,7 +3,7 @@
 #include "smtc_hal_spi.h"
 #include "smtc_hal_config.h"
 #include <string.h>
-#include <stdio.h>
+// Avoid pulling in stdio to keep libc small; use PRINTF from trace if needed
 
 static const nrfx_spim_t spi = NRFX_SPIM_INSTANCE( 3 );
 static uint8_t m_tx_buf[256] = { 0 };
@@ -79,7 +79,7 @@ void hal_spi_read_with_dummy_byte( uint8_t* buffer, uint16_t length, uint8_t dum
         }
         else
         {
-            printf( "error: spi m_tx_buf is emty\r\n" );
+            // Buffer too large for static TX staging; consider splitting transfer
         }
     }
 }
