@@ -142,7 +142,7 @@ void fds_init_write( void )
             fds_flash_record_t temp = { 0 };
             rc = fds_record_open( &desc, &temp );
             APP_ERROR_CHECK( rc );
-            memcpy( m_dummy_record[i].data.p_data, temp.p_data, ( temp.p_header->length_words * ( sizeof( uint32_t ))));
+            memcpy( (void*) m_dummy_record[i].data.p_data, temp.p_data, ( temp.p_header->length_words * ( sizeof( uint32_t ))));
             NRF_LOG_INFO( "DATA:%s", temp.p_data );
             rc = fds_record_close( &desc );
             APP_ERROR_CHECK( rc );
@@ -192,7 +192,7 @@ bool read_lfs_file( uint8_t file_name, uint8_t *data, uint8_t len )
         rc = fds_record_open( &desc, &temp );
         APP_ERROR_CHECK( rc );
         // memcpy( data, temp.p_data, len );
-        memcpy( m_dummy_record[file_name].data.p_data, temp.p_data, ( temp.p_header->length_words ) * sizeof( uint32_t ));
+    memcpy( (void*) m_dummy_record[file_name].data.p_data, temp.p_data, ( temp.p_header->length_words ) * sizeof( uint32_t ));
         NRF_LOG_INFO( "DATA:%s", temp.p_data );
         rc = fds_record_close( &desc );
         APP_ERROR_CHECK( rc );

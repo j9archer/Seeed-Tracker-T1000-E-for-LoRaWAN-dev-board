@@ -7,6 +7,7 @@
 #include "app_at_command.h"
 #include "app_config_param.h"
 #include "app_at_fds_datas.h"
+#include "app_ble_all.h"
 
 #define tiny_sscanf sscanf
 
