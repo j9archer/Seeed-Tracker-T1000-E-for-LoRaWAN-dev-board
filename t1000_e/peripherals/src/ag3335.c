@@ -5,6 +5,8 @@
 #undef MINMEA_MAX_SENTENCE_LENGTH
 #endif
 #include "minmea.h"
+// Override header's default length with local choice
+#undef MINMEA_MAX_SENTENCE_LENGTH
 
 #define GPS_INFO_PRINTF false
 

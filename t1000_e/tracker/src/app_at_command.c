@@ -1,4 +1,6 @@
 
+#include <string.h>
+#include "smtc_hal_mcu.h"
 #include "app_at_command.h"
 #include "app_at_fds_datas.h"
 
