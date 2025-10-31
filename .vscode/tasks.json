@@ -1,0 +1,18 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Build Tracker (SES emBuild)",
+			"type": "shell",
+			"command": "emBuild",
+			"args": [
+				"pca10056/s140/11_ses_lorawan_tracker/t1000_e_dev_kit_pca10056.emProject",
+				"-config",
+				"Release"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		}
+	]
+}

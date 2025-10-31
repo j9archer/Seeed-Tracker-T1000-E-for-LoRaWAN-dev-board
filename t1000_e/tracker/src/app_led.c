@@ -116,7 +116,7 @@ void app_led_breathe_stop( void )
     }
 }
 
-void app_user_led_event_timeout_handler( void )
+void app_user_led_event_timeout_handler( void* p_context )
 {
     switch( app_led_state )
     {
@@ -276,7 +276,7 @@ void app_led_idle( void )
     app_led_state = APP_LED_IDLE;
 }
 
-void app_user_bat_event_timeout_handler( void )
+void app_user_bat_event_timeout_handler( void* p_context )
 {
     app_timer_start( m_bat_event_timer_id,  APP_TIMER_TICKS( 3000 ), NULL );
 

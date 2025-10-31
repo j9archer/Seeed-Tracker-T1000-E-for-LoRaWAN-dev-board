@@ -15,7 +15,7 @@ static uint32_t song_start = 0;
 
 uint8_t app_beep_state = APP_BEEP_IDLE;
 
-void app_user_beep_event_timeout_handler( void )
+void app_user_beep_event_timeout_handler( void* p_context )
 {
     if( song_idx < song_len )
     {

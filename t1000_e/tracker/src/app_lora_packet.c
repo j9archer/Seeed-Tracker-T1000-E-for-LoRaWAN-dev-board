@@ -4,6 +4,7 @@
 #include "app_board.h"
 #include "app_config_param.h"
 #include "app_lora_packet.h"
+#include "main_lorawan_tracker.h"
 
 uint8_t app_lora_packet_buffer[LORAWAN_APP_DATA_MAX_SIZE] = { 0 };
 uint8_t app_lora_packet_len = 0;

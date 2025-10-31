@@ -4,6 +4,7 @@
 #include "app_led.h"
 #include "app_beep.h"
 #include "app_button.h"
+#include "main_lorawan_tracker.h"
 #include "smtc_modem_api.h"
 
 APP_TIMER_DEF(m_button_event_timer_id);
@@ -54,7 +55,7 @@ void app_button_irq_handler( void *obj )
     }
 }
 
-void app_user_button_event_timeout_handler( void )
+void app_user_button_event_timeout_handler( void* p_context )
 {
     if( button_long_det )
     {
@@ -242,7 +243,7 @@ void app_user_button_event_timeout_handler( void )
     }
 }
 
-void app_user_ble_adv_event_timeout_handler( void )
+void app_user_ble_adv_event_timeout_handler( void* p_context )
 {
     if( app_ble_is_disconnected( ))
     {
@@ -263,7 +264,7 @@ void app_user_ble_adv_event_timeout_handler( void )
     }
 }
 
-void app_user_sos_cnt_event_timeout_handler( void )
+void app_user_sos_cnt_event_timeout_handler( void* p_context )
 {
     if( sos_status )
     {
@@ -286,7 +287,7 @@ void app_user_sos_cnt_event_timeout_handler( void )
     }
 }
 
-void app_user_test_mode_event_timeout_handler( void )
+void app_user_test_mode_event_timeout_handler( void* p_context )
 {
     if(( app_beep_state == APP_BEEP_IDLE ) && ( app_led_state == APP_LED_IDLE ))
     {
