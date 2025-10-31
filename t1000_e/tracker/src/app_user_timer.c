@@ -9,13 +9,14 @@
 #include "smtc_hal_usb_cdc.h"
 #include "app_ble_all.h"
 #include "app_at.h"
+#include "app_at_command.h"
 #include "app_button.h"
 
 APP_TIMER_DEF(m_parse_cmd_timer_id);
 
 static bool parse_cmd_flag = false;
 
-static void app_user_parse_cmd_handler( void )
+static void app_user_parse_cmd_handler( void* p_context )
 {
     parse_cmd_flag = true;
 }
