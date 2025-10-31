@@ -21,6 +21,7 @@
 #include "app_config_param.h"
 #include "app_ble_nus.h"
 #include "app_ble_all.h"
+#include "app_user_timer.h"
 
 #define APP_BLE_CONN_CFG_TAG            1                                           /**< A tag identifying the SoftDevice BLE configuration. */
 #define APP_BLE_OBSERVER_PRIO           3                                           /**< Application's BLE observer priority. You shouldn't need to modify this value. */
