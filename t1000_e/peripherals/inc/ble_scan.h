@@ -48,6 +48,11 @@ void ble_scan_stop( void );
  */
 void ble_display_results( void );
 
+/*
+ * @brief Returns true if BLE scanning is currently active
+ */
+bool ble_scan_is_active( void );
+
 #ifdef __cplusplus
 }
 #endif

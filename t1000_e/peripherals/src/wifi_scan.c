@@ -39,6 +39,7 @@ bool wifi_scan_start( ralf_t* modem_radio )
     smtc_wifi_settings_init( &wifi_settings );
     
     /* Start WIFI scan */
+    HAL_DBG_TRACE_PRINTF( "WiFi scan START\r\n" );
     if( smtc_wifi_start_scan( modem_radio->ral.context ) != true )
     {
         HAL_DBG_TRACE_PRINTF( "RP_TASK_WIFI - failed to start scan, abort task\n" );
@@ -125,6 +126,7 @@ void wifi_scan_stop( ralf_t* modem_radio )
     lr11xx_system_sleep_cfg_t radio_sleep_cfg;
     radio_sleep_cfg.is_warm_start  = true;
     radio_sleep_cfg.is_rtc_timeout = false;
+    HAL_DBG_TRACE_PRINTF( "WiFi scan STOP -> radio SLEEP\r\n" );
     if( lr11xx_system_cfg_lfclk( modem_radio->ral.context, LR11XX_SYSTEM_LFCLK_RC, true ) != LR11XX_STATUS_OK )
     {
         HAL_DBG_TRACE_ERROR( "Failed to set LF clock\n" );

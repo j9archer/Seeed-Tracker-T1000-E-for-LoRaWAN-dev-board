@@ -65,7 +65,7 @@ MODEM_TRACE ?= yes
 MODEM_DEEP_TRACE ?= no
 
 # GNSS
-USE_GNSS ?= yes
+USE_GNSS ?= no
 
 
 #-----------------------------------------------------------------------------

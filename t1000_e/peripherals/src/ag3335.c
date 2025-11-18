@@ -1,5 +1,6 @@
 
 #include "smtc_hal.h"
+#include "smtc_hal_dbg_trace.h"
 // Silence redefinition warning and keep local buffer size choice
 #ifdef MINMEA_MAX_SENTENCE_LENGTH
 #undef MINMEA_MAX_SENTENCE_LENGTH
@@ -7,6 +8,18 @@
 #include "minmea.h"
 // Override header's default length with local choice
 #undef MINMEA_MAX_SENTENCE_LENGTH
+
+// Lightweight, easily toggled troubleshooting tracing for GNSS power lifecycle.
+// To disable at build time, pass -DGNSS_TRACE=0 in your project defines.
+#ifndef GNSS_TRACE
+#define GNSS_TRACE 1
+#endif
+
+#if GNSS_TRACE
+#define GNSS_TRACE_INFO(...) HAL_DBG_TRACE_INFO(__VA_ARGS__)
+#else
+#define GNSS_TRACE_INFO(...)
+#endif
 
 #define GPS_INFO_PRINTF false
 
@@ -237,15 +250,19 @@ void gnss_nmea_parse( char *str )
 void gnss_init( void )
 {
     hal_gpio_init_out( AG3335_POWER_EN, HAL_GPIO_SET ); // GPS_POWER_EN_PIN
+    GNSS_TRACE_INFO( "GNSS: POWER_EN -> ON\n" );
     hal_mcu_wait_ms( 10 );
     hal_gpio_init_out( AG3335_VRTC_EN, HAL_GPIO_SET ); // GPS_VRTC_EN_PIN
+    GNSS_TRACE_INFO( "GNSS: VRTC_EN -> ON\n" );
     hal_mcu_wait_ms( 10 );
 
     hal_gpio_init_out( AG3335_RESET, HAL_GPIO_SET ); // GPS_RST_PIN, reset by high
     hal_mcu_wait_ms( 10 );
     hal_gpio_set_value( AG3335_RESET, HAL_GPIO_RESET );
+    GNSS_TRACE_INFO( "GNSS: RESET pulse (RST=HI then LOW)\n" );
 
     hal_gpio_init_out( AG3335_SLEEP_INT, HAL_GPIO_SET ); // GPS_SLEEP_INT_PIN, set GPS quit sleep mode, low active
+    GNSS_TRACE_INFO( "GNSS: SLEEP_INT -> HIGH (awake)\n" );
     hal_gpio_init_out( AG3335_RTC_INT, HAL_GPIO_RESET ); // GPS_RTC_INT_PIN, set GPS quit rtc mode, high pulse(1ms)active
     hal_gpio_init_in( AG3335_RESETB_OUT, HAL_GPIO_PULL_MODE_UP, HAL_GPIO_IRQ_MODE_OFF, NULL ); // GPS_RESETB_OUT_PIN, gps reset ok, to mcu
 }
@@ -301,24 +318,31 @@ bool gnss_scan_start( void )
     hal_uart_0_init( );
 
     hal_gpio_set_value( AG3335_POWER_EN, HAL_GPIO_SET );
+    GNSS_TRACE_INFO( "GNSS: POWER_EN -> ON (scan_start)\n" );
     hal_mcu_wait_ms( 50 );
 
     // Power up GPS
     hal_gpio_set_value( AG3335_RTC_INT, HAL_GPIO_SET );
+    GNSS_TRACE_INFO( "GNSS: RTC_INT -> HIGH (wake pulse begin)\n" );
     hal_mcu_wait_ms( 3 );
     hal_gpio_set_value( AG3335_RTC_INT, HAL_GPIO_RESET );
+    GNSS_TRACE_INFO( "GNSS: RTC_INT -> LOW (wake pulse end)\n" );
     hal_mcu_wait_ms( 50 );
 
     gnss_scan_lock_sleep( );
+    GNSS_TRACE_INFO( "GNSS: lock sleep (active tracking)\n" );
     return true;
 }
 
 void gnss_scan_stop( void )
 {
     gnss_scan_unlock_sleep( );
+    GNSS_TRACE_INFO( "GNSS: unlock sleep\n" );
     gnss_scan_enter_rtc_mode( );
+    GNSS_TRACE_INFO( "GNSS: enter RTC mode\n" );
     hal_mcu_wait_ms( 50 );
     hal_gpio_set_value( AG3335_POWER_EN, HAL_GPIO_RESET );
+    GNSS_TRACE_INFO( "GNSS: POWER_EN -> OFF (scan_stop)\n" );
     hal_uart_0_deinit( );
 }
 

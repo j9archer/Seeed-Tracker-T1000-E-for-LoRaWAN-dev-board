@@ -48,6 +48,8 @@ uint8_t ble_beacon_rssi_array[BLE_BEACON_BUF_MAX] = { 0 };
 uint8_t ble_uuid_filter_array[16] = { 0 };
 uint8_t ble_uuid_filter_num = 0;
 
+static bool s_ble_scanning = false;     /**< Internal flag tracking if a scan is active */
+
 static bool buf_cmp_value( uint8_t *a, uint8_t *b, uint8_t len )
 {
     for( uint8_t i = 0; i < len; i++ )
@@ -244,6 +246,12 @@ bool ble_scan_start( void )
 
     err_code = nrf_ble_scan_start( &m_scan );
     APP_ERROR_CHECK( err_code );
+
+    s_ble_scanning = true;
+    HAL_DBG_TRACE_PRINTF( "BLE scan START (interval=%u, window=%u, duration=%u)\r\n",
+                          (unsigned) APP_SCAN_INTERVAL, (unsigned) APP_SCAN_WINDOW, (unsigned) APP_SCAN_DURATION );
+
+    return true;
 }
 
 bool ble_get_results( uint8_t *result, uint8_t *size )
@@ -308,6 +316,8 @@ bool ble_get_results( uint8_t *result, uint8_t *size )
 void ble_scan_stop( void )
 {
     nrf_ble_scan_stop( );
+    s_ble_scanning = false;
+    HAL_DBG_TRACE_PRINTF( "BLE scan STOP\r\n" );
 }
 
 void ble_display_results( void )
@@ -335,4 +345,9 @@ void ble_display_results( void )
         HAL_DBG_TRACE_PRINTF( "%02x\r\n", ble_beacon_buf[ble_beacon_rssi_array[i]].mac[0] );
     }
     HAL_DBG_TRACE_PRINTF( "\n" );
+}
+
+bool ble_scan_is_active( void )
+{
+    return s_ble_scanning;
 }
