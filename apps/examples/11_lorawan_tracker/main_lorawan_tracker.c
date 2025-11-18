@@ -28,6 +28,7 @@
 #include "app_beep.h"
 #include "app_timer.h"
 #include "wifi_scan.h"
+#include "vessel_assistance.h"
 
 /*
  * -----------------------------------------------------------------------------
@@ -244,6 +245,9 @@ int main( void )
     app_ble_all_init( );
     app_led_init( );
     app_beep_init( );
+    
+    /* Initialize vessel assistance system */
+    vessel_assistance_init( );
 
     app_beep_boot_up( );
 
@@ -631,6 +635,11 @@ static void on_modem_down_data( int8_t rssi, int8_t snr, smtc_modem_event_downda
         {
             app_lora_packet_downlink_decode( (uint8_t*) payload, size );
         }
+        else if( port == VESSEL_ASSISTANCE_PORT )
+        {
+            // Handle vessel position and time update
+            vessel_assistance_handle_downlink( payload, size );
+        }
     }
 }
 
@@ -672,10 +681,29 @@ static void app_tracker_wifi_scan_end( void )
     if( tracker_test_mode == 0 && tracker_wifi_scan_len ) scan_result = true;
 }
 
+static uint32_t app_get_adaptive_gnss_scan_duration( void )
+{
+    // Use vessel assistance to determine optimal scan duration
+    uint32_t recommended_duration = vessel_assistance_get_recommended_scan_duration( );
+    
+    // Override with user-configured duration if it's longer
+    // (user may have specific requirements)
+    if( gnss_scan_duration > recommended_duration )
+    {
+        return gnss_scan_duration;
+    }
+    
+    return recommended_duration;
+}
+
 static void app_tracker_gnss_scan_begin( void )
 {
     tracker_gps_scan_len = 0;
     memset( tracker_gps_scan_data, 0, sizeof( tracker_gps_scan_data ));
+    
+    // Apply vessel assistance before starting GNSS scan
+    vessel_assistance_apply_to_gnss( );
+    
     gnss_scan_start( );
 }
 
@@ -690,6 +718,9 @@ static void app_tracker_gnss_scan_end( void )
         memcpyr( tracker_gps_scan_data, ( uint8_t *)&lon, 4 );
         memcpyr( tracker_gps_scan_data + 4, ( uint8_t *)&lat, 4 );
         tracker_gps_scan_len = 8;
+        
+        // Store own GNSS fix as fallback assistance
+        vessel_assistance_store_own_fix( lat, lon );
     }
     else
     {
@@ -885,15 +916,18 @@ static void app_tracker_scan_process( void )
     {
         if( tracker_scan_status == 0 )
         {
-            smtc_modem_alarm_start_timer( gnss_scan_duration );
-            HAL_DBG_TRACE_PRINTF( "gnss begin, new alarm %d s\n\n", gnss_scan_duration );
+            // Use adaptive scan duration based on vessel assistance quality
+            uint32_t adaptive_duration = app_get_adaptive_gnss_scan_duration( );
+            smtc_modem_alarm_start_timer( adaptive_duration );
+            HAL_DBG_TRACE_PRINTF( "gnss begin, adaptive alarm %d s\n\n", adaptive_duration );
             tracker_scan_begin = hal_rtc_get_time_s( );
             app_tracker_gnss_scan_begin( );
             tracker_scan_status = 1;
         }
         else if( tracker_scan_status == 1 )
         {
-            next_delay = (int32_t)( tracker_periodic_interval ) - gnss_scan_duration;
+            uint32_t adaptive_duration = app_get_adaptive_gnss_scan_duration( );
+            next_delay = (int32_t)( tracker_periodic_interval ) - adaptive_duration;
             smtc_modem_alarm_start_timer( next_delay > 0 ? next_delay : 1 );
             HAL_DBG_TRACE_PRINTF( "gnss end, new alarm %d s\n\n", next_delay > 0 ? next_delay : 1 );
             app_tracker_gnss_scan_end( );
