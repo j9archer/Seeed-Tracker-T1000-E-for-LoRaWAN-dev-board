@@ -11,6 +11,8 @@
 
 #include "vessel_assistance.h"
 #include "smtc_hal.h"
+#include "smtc_hal_gpio.h"
+#include "smtc_hal_config.h"
 #include "ag3335.h"
 #include <string.h>
 #include <stdio.h>
@@ -172,15 +174,41 @@ uint32_t vessel_assistance_get_recommended_scan_duration(void)
     assistance_quality_t quality = vessel_assistance_get_quality();
     
     switch (quality) {
-        case ASSISTANCE_EXCELLENT:
+        case ASSISTANCE_QUALITY_EXCELLENT:
             return GNSS_SCAN_DURATION_EXCELLENT;
-        case ASSISTANCE_GOOD:
+        case ASSISTANCE_QUALITY_GOOD:
             return GNSS_SCAN_DURATION_GOOD;
-        case ASSISTANCE_FAIR:
+        case ASSISTANCE_QUALITY_FAIR:
             return GNSS_SCAN_DURATION_FAIR;
         default:
             return GNSS_SCAN_DURATION_COLD;
     }
+}
+
+bool vessel_assistance_is_charging(void)
+{
+    // Check if USB/charger is connected
+    return (hal_gpio_get_value(CHARGER_ADC_DET) != 0);
+}
+
+bool vessel_assistance_needs_almanac_maintenance(uint32_t days_threshold)
+{
+    if (!g_position_cache.valid) {
+        return false;  // No reference time available
+    }
+    
+    uint32_t current_time = hal_rtc_get_time_s();
+    uint32_t time_since_fix = current_time - g_position_cache.rtc_at_receipt;
+    uint32_t days_since_fix = time_since_fix / 86400;
+    
+    return (days_since_fix >= days_threshold);
+}
+
+uint32_t vessel_assistance_get_almanac_scan_duration(void)
+{
+    // Extended duration for almanac download
+    // 750 seconds (12.5 minutes) allows full almanac download from one satellite
+    return 750;
 }
 
 bool vessel_assistance_apply_to_gnss(void)
@@ -269,6 +297,32 @@ static bool send_ag3335_command(const char* command)
     }
     
     return true;
+}
+
+bool vessel_assistance_is_charging(void)
+{
+    // Check if USB/charger is connected
+    return (hal_gpio_get_value(CHARGER_ADC_DET) != 0);
+}
+
+bool vessel_assistance_needs_almanac_maintenance(uint32_t days_threshold)
+{
+    if (!g_position_cache.valid) {
+        return false;  // No reference time available
+    }
+    
+    uint32_t current_time = hal_rtc_get_time_s();
+    uint32_t time_since_fix = current_time - g_position_cache.rtc_at_receipt;
+    uint32_t days_since_fix = time_since_fix / 86400;
+    
+    return (days_since_fix >= days_threshold);
+}
+
+uint32_t vessel_assistance_get_almanac_scan_duration(void)
+{
+    // Extended duration for almanac download
+    // 750 seconds (12.5 minutes) allows full almanac download from one satellite
+    return 750;
 }
 
 /* --- EOF ------------------------------------------------------------------ */

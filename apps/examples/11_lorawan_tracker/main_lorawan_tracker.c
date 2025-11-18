@@ -683,6 +683,14 @@ static void app_tracker_wifi_scan_end( void )
 
 static uint32_t app_get_adaptive_gnss_scan_duration( void )
 {
+    // Check if device is charging and almanac maintenance is needed
+    // This allows almanac refresh without draining battery
+    if( vessel_assistance_is_charging( ) && vessel_assistance_needs_almanac_maintenance( 14 ))
+    {
+        HAL_DBG_TRACE_INFO( "Charging detected - scheduling almanac maintenance\n" );
+        return vessel_assistance_get_almanac_scan_duration( );  // 12.5 minutes
+    }
+    
     // Use vessel assistance to determine optimal scan duration
     uint32_t recommended_duration = vessel_assistance_get_recommended_scan_duration( );
     

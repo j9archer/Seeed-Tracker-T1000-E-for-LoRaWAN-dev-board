@@ -134,6 +134,31 @@ uint32_t vessel_assistance_get_time_uncertainty(void);
 uint32_t vessel_assistance_get_recommended_scan_duration(void);
 
 /*!
+ * @brief Check if device is currently charging
+ *
+ * @returns true if USB/charger connected, false otherwise
+ */
+bool vessel_assistance_is_charging(void);
+
+/*!
+ * @brief Check if almanac maintenance is needed
+ *
+ * @param [in] days_threshold Number of days without GNSS fix before maintenance needed
+ * @returns true if almanac maintenance should be performed
+ */
+bool vessel_assistance_needs_almanac_maintenance(uint32_t days_threshold);
+
+/*!
+ * @brief Get extended scan duration for almanac download
+ *
+ * Provides longer scan duration (12.5 minutes) to allow almanac download
+ * when device hasn't had a GNSS fix for an extended period
+ *
+ * @returns Extended scan duration in seconds (750s = 12.5 minutes)
+ */
+uint32_t vessel_assistance_get_almanac_scan_duration(void);
+
+/*!
  * @brief Apply position assistance to GNSS module
  *
  * Sends assistance position to AG3335 if available and useful
