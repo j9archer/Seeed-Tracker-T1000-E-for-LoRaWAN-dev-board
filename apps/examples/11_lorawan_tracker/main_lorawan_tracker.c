@@ -29,6 +29,7 @@
 #include "app_timer.h"
 #include "wifi_scan.h"
 #include "vessel_assistance.h"
+#include "firmware_version.h"
 
 /*
  * -----------------------------------------------------------------------------
@@ -248,6 +249,12 @@ int main( void )
     
     /* Initialize vessel assistance system */
     vessel_assistance_init( );
+    
+    /* Print firmware version */
+    HAL_DBG_TRACE_INFO( "========================================\n" );
+    HAL_DBG_TRACE_INFO( "T1000-E Tracker Firmware v%s\n", FIRMWARE_VERSION_STRING );
+    HAL_DBG_TRACE_INFO( "Features: %s\n", FIRMWARE_VERSION_FEATURES );
+    HAL_DBG_TRACE_INFO( "========================================\n" );
 
     app_beep_boot_up( );
 
