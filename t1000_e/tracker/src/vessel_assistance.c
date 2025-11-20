@@ -194,14 +194,21 @@ bool vessel_assistance_is_charging(void)
 bool vessel_assistance_needs_almanac_maintenance(uint32_t days_threshold)
 {
     if (!position_cache.valid) {
-        return false;  // No reference time available
+        // No fix ever received - almanac is likely stale, maintenance needed
+        HAL_DBG_TRACE_INFO("Almanac maintenance needed - no prior fix\n");
+        return true;
     }
     
     uint32_t current_time = hal_rtc_get_time_s();
     uint32_t time_since_fix = current_time - position_cache.rtc_at_receipt;
     uint32_t days_since_fix = time_since_fix / 86400;
     
-    return (days_since_fix >= days_threshold);
+    if (days_since_fix >= days_threshold) {
+        HAL_DBG_TRACE_INFO("Almanac maintenance needed - %lu days since last fix\n", days_since_fix);
+        return true;
+    }
+    
+    return false;
 }
 
 uint32_t vessel_assistance_get_almanac_scan_duration(void)

@@ -36,11 +36,39 @@ fi
 echo -e "${GREEN}Found T1000-E on: $PORT${NC}"
 echo -e "${GREEN}Baud rate: 115200${NC}"
 echo ""
-echo -e "${YELLOW}To exit: Press Ctrl-A then K (or Ctrl-C to force quit)${NC}"
+
+# Check for preferred terminal programs
+if command -v picocom &> /dev/null; then
+    TERMINAL="picocom"
+    echo -e "${YELLOW}Using picocom (best CR/LF handling)${NC}"
+    echo -e "${YELLOW}To exit: Press Ctrl-A then Ctrl-X${NC}"
+elif command -v minicom &> /dev/null; then
+    TERMINAL="minicom"
+    echo -e "${YELLOW}Using minicom${NC}"
+    echo -e "${YELLOW}To exit: Press Ctrl-A then X${NC}"
+else
+    TERMINAL="screen"
+    echo -e "${YELLOW}Using screen (add 'crlf on' to ~/.screenrc for better CR/LF)${NC}"
+    echo -e "${YELLOW}To exit: Press Ctrl-A then K${NC}"
+fi
+
 echo -e "${YELLOW}To reset device: Press the reset button${NC}"
 echo ""
 echo "Connecting in 2 seconds..."
 sleep 2
 
-# Connect using screen
-screen "$PORT" 115200
+# Configure port with proper settings (convert LF to CRLF)
+stty -f "$PORT" 115200 cs8 -cstopb -parenb onlcr
+
+# Connect using best available terminal
+case "$TERMINAL" in
+    picocom)
+        picocom -b 115200 --omap crlf "$PORT"
+        ;;
+    minicom)
+        minicom -D "$PORT" -b 115200
+        ;;
+    *)
+        screen "$PORT" 115200
+        ;;
+esac

@@ -285,7 +285,8 @@ APP_MAIN:
     smtc_modem_init( modem_radio, &apps_modem_event_process );
 
     HAL_DBG_TRACE_MSG( "\n" );
-    HAL_DBG_TRACE_INFO( "###### ===== T1000-E Tracker example ==== ######\n\n" );
+    HAL_DBG_TRACE_INFO( "###### ===== T1000-E Tracker %s (%s %s) ==== ######\n\n", 
+                        FIRMWARE_VERSION_STRING, __DATE__, __TIME__ );
 
     /* LoRa Basics Modem Version */
     apps_modem_common_display_lbm_version( );
@@ -690,9 +691,13 @@ static void app_tracker_wifi_scan_end( void )
 
 static uint32_t app_get_adaptive_gnss_scan_duration( void )
 {
+    // Check charging status
+    bool is_charging = vessel_assistance_is_charging( );
+    HAL_DBG_TRACE_INFO( "GNSS scan duration calc - charging: %s\n", is_charging ? "YES" : "NO" );
+    
     // Check if device is charging and almanac maintenance is needed
     // This allows almanac refresh without draining battery
-    if( vessel_assistance_is_charging( ) && vessel_assistance_needs_almanac_maintenance( 14 ))
+    if( is_charging && vessel_assistance_needs_almanac_maintenance( 14 ))
     {
         HAL_DBG_TRACE_INFO( "Charging detected - scheduling almanac maintenance\n" );
         return vessel_assistance_get_almanac_scan_duration( );  // 12.5 minutes
@@ -972,11 +977,24 @@ static void app_tracker_scan_process( void )
     {
         if( tracker_scan_status == 0 )
         {
-            smtc_modem_alarm_start_timer( wifi_scan_duration );
-            HAL_DBG_TRACE_PRINTF( "wifi begin, new alarm %d s\n\n", wifi_scan_duration );
-            tracker_scan_begin = hal_rtc_get_time_s( );
-            app_tracker_wifi_scan_begin( );
-            tracker_scan_status = 1;
+            // Check if almanac maintenance needed while charging - prioritize over WiFi
+            if( vessel_assistance_is_charging( ) && vessel_assistance_needs_almanac_maintenance( 14 ))
+            {
+                uint32_t adaptive_duration = app_get_adaptive_gnss_scan_duration( );
+                smtc_modem_alarm_start_timer( adaptive_duration );
+                HAL_DBG_TRACE_PRINTF( "almanac maintenance priority - skip wifi\r\ngnss begin, adaptive alarm %d s\n\n", adaptive_duration );
+                tracker_scan_begin = hal_rtc_get_time_s( );
+                app_tracker_gnss_scan_begin( );
+                tracker_scan_status = 2;  // Skip to GNSS-end state
+            }
+            else
+            {
+                smtc_modem_alarm_start_timer( wifi_scan_duration );
+                HAL_DBG_TRACE_PRINTF( "wifi begin, new alarm %d s\n\n", wifi_scan_duration );
+                tracker_scan_begin = hal_rtc_get_time_s( );
+                app_tracker_wifi_scan_begin( );
+                tracker_scan_status = 1;
+            }
         }
         else if( tracker_scan_status == 1 )
         {
@@ -990,15 +1008,17 @@ static void app_tracker_scan_process( void )
             }
             else
             {
-                smtc_modem_alarm_start_timer( gnss_scan_duration );
-                HAL_DBG_TRACE_PRINTF( "wifi end\r\ngnss begin, new alarm %d s\n\n", gnss_scan_duration );
+                uint32_t adaptive_duration = app_get_adaptive_gnss_scan_duration( );
+                smtc_modem_alarm_start_timer( adaptive_duration );
+                HAL_DBG_TRACE_PRINTF( "wifi end\r\ngnss begin, adaptive alarm %d s\n\n", adaptive_duration );
                 tracker_scan_status = 2;
                 app_tracker_gnss_scan_begin( );
             }          
         }
         else if( tracker_scan_status == 2 )
         {
-            next_delay = (int32_t)( tracker_periodic_interval ) - wifi_scan_duration - gnss_scan_duration;
+            uint32_t adaptive_duration = app_get_adaptive_gnss_scan_duration( );
+            next_delay = (int32_t)( tracker_periodic_interval ) - wifi_scan_duration - adaptive_duration;
             smtc_modem_alarm_start_timer( next_delay > 0 ? next_delay : 1 );
             HAL_DBG_TRACE_PRINTF( "gnss end, new alarm %d s\n\n", next_delay > 0 ? next_delay : 1 );
             app_tracker_gnss_scan_end( );
@@ -1009,8 +1029,10 @@ static void app_tracker_scan_process( void )
     {
         if( tracker_scan_status == 0 )
         {
-            smtc_modem_alarm_start_timer( gnss_scan_duration );
-            HAL_DBG_TRACE_PRINTF( "gnss begin, new alarm %d s\n\n", gnss_scan_duration );
+            // GNSS-first mode: adaptive duration handles almanac maintenance priority automatically
+            uint32_t adaptive_duration = app_get_adaptive_gnss_scan_duration( );
+            smtc_modem_alarm_start_timer( adaptive_duration );
+            HAL_DBG_TRACE_PRINTF( "gnss begin, adaptive alarm %d s\n\n", adaptive_duration );
             tracker_scan_begin = hal_rtc_get_time_s( );
             app_tracker_gnss_scan_begin( );
             tracker_scan_status = 1;
@@ -1020,7 +1042,8 @@ static void app_tracker_scan_process( void )
             app_tracker_gnss_scan_end( );
             if( scan_result )
             {
-                next_delay = (int32_t)( tracker_periodic_interval ) - gnss_scan_duration;
+                uint32_t adaptive_duration = app_get_adaptive_gnss_scan_duration( );
+                next_delay = (int32_t)( tracker_periodic_interval ) - adaptive_duration;
                 smtc_modem_alarm_start_timer( next_delay > 0 ? next_delay : 1 );
                 HAL_DBG_TRACE_PRINTF( "gnss end, new alarm %d s\n\n", next_delay > 0 ? next_delay : 1 );
                 tracker_scan_status = 0xff;
@@ -1035,7 +1058,8 @@ static void app_tracker_scan_process( void )
         }
         else if( tracker_scan_status == 2 )
         {
-            next_delay = (int32_t)( tracker_periodic_interval ) - gnss_scan_duration - wifi_scan_duration;
+            uint32_t adaptive_duration = app_get_adaptive_gnss_scan_duration( );
+            next_delay = (int32_t)( tracker_periodic_interval ) - adaptive_duration - wifi_scan_duration;
             smtc_modem_alarm_start_timer( next_delay > 0 ? next_delay : 1 );
             HAL_DBG_TRACE_PRINTF( "wifi end, new alarm %d s\n\n", next_delay > 0 ? next_delay : 1 );
             app_tracker_wifi_scan_end( );
@@ -1102,11 +1126,24 @@ static void app_tracker_scan_process( void )
     {
         if( tracker_scan_status == 0 )
         {
-            smtc_modem_alarm_start_timer( ble_scan_duration );
-            HAL_DBG_TRACE_PRINTF( "ble begin, new alarm %d s\n\n", ble_scan_duration );
-            tracker_scan_begin = hal_rtc_get_time_s( );
-            app_tracker_ble_scan_begin( );
-            tracker_scan_status = 1;
+            // Check if almanac maintenance needed while charging - prioritize over BLE
+            if( vessel_assistance_is_charging( ) && vessel_assistance_needs_almanac_maintenance( 14 ))
+            {
+                uint32_t adaptive_duration = app_get_adaptive_gnss_scan_duration( );
+                smtc_modem_alarm_start_timer( adaptive_duration );
+                HAL_DBG_TRACE_PRINTF( "almanac maintenance priority - skip ble\r\ngnss begin, adaptive alarm %d s\n\n", adaptive_duration );
+                tracker_scan_begin = hal_rtc_get_time_s( );
+                app_tracker_gnss_scan_begin( );
+                tracker_scan_status = 2;  // Skip to GNSS-end state
+            }
+            else
+            {
+                smtc_modem_alarm_start_timer( ble_scan_duration );
+                HAL_DBG_TRACE_PRINTF( "ble begin, new alarm %d s\n\n", ble_scan_duration );
+                tracker_scan_begin = hal_rtc_get_time_s( );
+                app_tracker_ble_scan_begin( );
+                tracker_scan_status = 1;
+            }
         }
         else if( tracker_scan_status == 1 )
         {
@@ -1120,15 +1157,17 @@ static void app_tracker_scan_process( void )
             }
             else
             {
-                smtc_modem_alarm_start_timer( gnss_scan_duration );
-                HAL_DBG_TRACE_PRINTF( "ble end\r\ngnss begin, new alarm %d s\n\n", gnss_scan_duration );
+                uint32_t adaptive_duration = app_get_adaptive_gnss_scan_duration( );
+                smtc_modem_alarm_start_timer( adaptive_duration );
+                HAL_DBG_TRACE_PRINTF( "ble end\r\ngnss begin, adaptive alarm %d s\n\n", adaptive_duration );
                 app_tracker_gnss_scan_begin( );
                 tracker_scan_status = 2;
             }
         }
         else if( tracker_scan_status == 2 )
         {
-            next_delay = (int32_t)( tracker_periodic_interval ) - ble_scan_duration - gnss_scan_duration;
+            uint32_t adaptive_duration = app_get_adaptive_gnss_scan_duration( );
+            next_delay = (int32_t)( tracker_periodic_interval ) - ble_scan_duration - adaptive_duration;
             smtc_modem_alarm_start_timer( next_delay > 0 ? next_delay : 1 );
             HAL_DBG_TRACE_PRINTF( "gnss end, new alarm %d s\n\n", next_delay > 0 ? next_delay : 1 );
             app_tracker_gnss_scan_end( );
@@ -1139,11 +1178,24 @@ static void app_tracker_scan_process( void )
     {
         if( tracker_scan_status == 0 )
         {
-            smtc_modem_alarm_start_timer( ble_scan_duration );
-            HAL_DBG_TRACE_PRINTF( "ble begin, new alarm %d s\n\n", ble_scan_duration );
-            tracker_scan_begin = hal_rtc_get_time_s( );
-            app_tracker_ble_scan_begin( );
-            tracker_scan_status = 1;
+            // Check if almanac maintenance needed while charging - prioritize over BLE/WiFi
+            if( vessel_assistance_is_charging( ) && vessel_assistance_needs_almanac_maintenance( 14 ))
+            {
+                uint32_t adaptive_duration = app_get_adaptive_gnss_scan_duration( );
+                smtc_modem_alarm_start_timer( adaptive_duration );
+                HAL_DBG_TRACE_PRINTF( "almanac maintenance priority - skip ble/wifi\r\ngnss begin, adaptive alarm %d s\n\n", adaptive_duration );
+                tracker_scan_begin = hal_rtc_get_time_s( );
+                app_tracker_gnss_scan_begin( );
+                tracker_scan_status = 3;  // Skip to GNSS-end state (after BLE+WiFi)
+            }
+            else
+            {
+                smtc_modem_alarm_start_timer( ble_scan_duration );
+                HAL_DBG_TRACE_PRINTF( "ble begin, new alarm %d s\n\n", ble_scan_duration );
+                tracker_scan_begin = hal_rtc_get_time_s( );
+                app_tracker_ble_scan_begin( );
+                tracker_scan_status = 1;
+            }
         }
         else if( tracker_scan_status == 1 )
         {
@@ -1175,15 +1227,17 @@ static void app_tracker_scan_process( void )
             }
             else
             {
-                smtc_modem_alarm_start_timer( gnss_scan_duration );
-                HAL_DBG_TRACE_PRINTF( "wifi end\r\ngnss begin, new alarm %d s\n\n", gnss_scan_duration );
+                uint32_t adaptive_duration = app_get_adaptive_gnss_scan_duration( );
+                smtc_modem_alarm_start_timer( adaptive_duration );
+                HAL_DBG_TRACE_PRINTF( "wifi end\r\ngnss begin, adaptive alarm %d s\n\n", adaptive_duration );
                 tracker_scan_status = 3;
                 app_tracker_gnss_scan_begin( );
             }
         }
         else if( tracker_scan_status == 3 )
         {
-            next_delay = (int32_t)( tracker_periodic_interval ) - ble_scan_duration - wifi_scan_duration - gnss_scan_duration;
+            uint32_t adaptive_duration = app_get_adaptive_gnss_scan_duration( );
+            next_delay = (int32_t)( tracker_periodic_interval ) - ble_scan_duration - wifi_scan_duration - adaptive_duration;
             smtc_modem_alarm_start_timer( next_delay > 0 ? next_delay : 1 );
             HAL_DBG_TRACE_PRINTF( "gnss end, new alarm %d s\n\n", next_delay > 0 ? next_delay : 1 );
             app_tracker_gnss_scan_end( );

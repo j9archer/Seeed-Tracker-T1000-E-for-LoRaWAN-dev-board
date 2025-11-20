@@ -28,7 +28,15 @@ You should see something like:
 screen /dev/cu.usbmodem14201 115200
 ```
 
-**Option B: Using `minicom`**
+If you see missing carriage returns (lines overwriting each other), add this to `~/.screenrc`:
+```
+# Handle CRLF line endings
+crlf on
+```
+
+Or use one of the other options below.
+
+**Option B: Using `minicom` (better CR/LF handling)**
 ```bash
 # Install if needed
 brew install minicom
@@ -37,7 +45,16 @@ brew install minicom
 minicom -D /dev/cu.usbmodem14201 -b 115200
 ```
 
-**Option C: Using `cu`**
+**Option C: Using `picocom` (recommended - best for embedded systems)**
+```bash
+# Install
+brew install picocom
+
+# Connect with proper line ending handling
+picocom -b 115200 --omap crlf /dev/cu.usbmodem14201
+```
+
+**Option D: Using `cu`**
 ```bash
 cu -l /dev/cu.usbmodem14201 -s 115200
 ```

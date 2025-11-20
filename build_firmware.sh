@@ -47,7 +47,7 @@ echo -e "${BLUE}========================================${NC}"
 
 # Clean old build
 echo -e "${GREEN}Cleaning previous build...${NC}"
-rm -rf "$BUILD_OUTPUT"
+"$EMBUILD" -config "Release" -clean "$EMPROJECT"
 
 # Build firmware
 echo -e "${GREEN}Building firmware...${NC}"
