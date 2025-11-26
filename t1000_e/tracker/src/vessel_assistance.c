@@ -13,10 +13,12 @@
 #include "smtc_hal.h"
 #include "smtc_hal_gpio.h"
 #include "smtc_hal_config.h"
+#include "smtc_modem_api.h"
 #include "ag3335.h"
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
+#include <time.h>
 
 /*
  * -----------------------------------------------------------------------------
@@ -86,21 +88,45 @@ bool vessel_assistance_handle_downlink(const uint8_t* payload, uint8_t size)
         return false;
     }
     
-    // Extract position and time
+    // Extract position from downlink
     position_cache.latitude = msg->vessel_lat / 10000000.0f;
     position_cache.longitude = msg->vessel_lon / 10000000.0f;
-    position_cache.unix_time = msg->unix_time;
+    
+    // Get current GPS time from modem (set via DeviceTimeReq)
+    uint32_t gps_time_s = 0;
+    uint32_t gps_frac_s = 0;
+    if (smtc_modem_get_time(&gps_time_s, &gps_frac_s) == SMTC_MODEM_RC_OK) {
+        // Convert GPS time to Unix time (GPS epoch Jan 6, 1980 = Unix 315964800)
+        position_cache.unix_time = gps_time_s + 315964800 - 18; // subtract leap seconds
+        position_cache.time_uncertainty = 2; // DeviceTimeReq typically ±1-2 seconds
+    } else {
+        // Fallback to RTC if modem time not available
+        position_cache.unix_time = hal_rtc_get_time_s();
+        position_cache.time_uncertainty = 3600; // Large uncertainty without time sync
+    }
+    
     position_cache.rtc_at_receipt = hal_rtc_get_time_s();
-    position_cache.time_uncertainty = 60; // Assume ±60 seconds from potential queuing
     position_cache.valid = true;
     
-    // Update system RTC with vessel time (if RTC set function available)
-    // hal_rtc_set_time_s(msg->unix_time); // TODO: Implement if needed
-    
-    HAL_DBG_TRACE_INFO("Vessel position received: %.6f, %.6f @ %u\n",
+    HAL_DBG_TRACE_INFO("Vessel position received: %.6f, %.6f @ %u (GPS time)\n",
                        position_cache.latitude,
                        position_cache.longitude,
                        position_cache.unix_time);
+    
+    // Send PAIR600 command immediately to AG3335 NVRAM
+    // Format: $PAIR600,lat,lon,height,accMaj,accMin,bear,accVert*CS
+    // Using conservative 50m horizontal / 100m vertical accuracy
+    char pos_cmd[120];
+    snprintf(pos_cmd, sizeof(pos_cmd), 
+             "$PAIR600,%.6f,%.6f,0.0,50.0,50.0,0.0,100.0",
+             position_cache.latitude,
+             position_cache.longitude);
+    
+    if (send_ag3335_command(pos_cmd)) {
+        HAL_DBG_TRACE_INFO("Position written to AG3335 NVRAM (PAIR600)\n");
+    } else {
+        HAL_DBG_TRACE_WARNING("Failed to send PAIR600\n");
+    }
     
     return true;
 }
@@ -218,32 +244,54 @@ uint32_t vessel_assistance_get_almanac_scan_duration(void)
     return 750;
 }
 
-bool vessel_assistance_apply_to_gnss(void)
+bool vessel_assistance_send_time_to_gnss(void)
 {
-    if (!vessel_assistance_is_available()) {
-        HAL_DBG_TRACE_INFO("No vessel assistance available for GNSS\n");
+    // Send UTC time to AG3335 NVRAM via PAIR590
+    // Called immediately when DeviceTimeAns received
+    // Format: $PAIR590,YYYY,MM,DD,hh,mm,ss*CS
+    // Note: Must use UTC, not local time. Accuracy <3 seconds recommended.
+    
+    // Get current GPS time from modem (just updated by DeviceTimeAns)
+    uint32_t gps_time_s = 0;
+    uint32_t gps_frac_s = 0;
+    
+    if (smtc_modem_get_time(&gps_time_s, &gps_frac_s) != SMTC_MODEM_RC_OK) {
+        HAL_DBG_TRACE_WARNING("Failed to get modem time for PAIR590\n");
         return false;
     }
     
-    assistance_quality_t quality = vessel_assistance_get_quality();
-    const char* quality_str = (quality == ASSISTANCE_EXCELLENT) ? "EXCELLENT" :
-                             (quality == ASSISTANCE_GOOD) ? "GOOD" : "FAIR";
+    // Convert GPS time to Unix time (GPS epoch Jan 6, 1980 = Unix 315964800)
+    // Current leap seconds between GPS and UTC = 18 seconds
+    uint32_t unix_time = gps_time_s + 315964800 - 18;
     
-    HAL_DBG_TRACE_INFO("Applying vessel assistance (%s): %.6f, %.6f\n",
-                       quality_str,
-                       position_cache.latitude,
-                       position_cache.longitude);
+    // Update position cache with new time
+    position_cache.unix_time = unix_time;
+    position_cache.time_uncertainty = 2; // DeviceTimeReq typically ±1-2 seconds
     
-    // Send assistance position to AG3335 via PAIR062 command
-    char command[80];
-    snprintf(command, sizeof(command), "$PAIR062,%.6f,%.6f",
-             position_cache.latitude, position_cache.longitude);
+    struct tm timeinfo;
+    time_t unix_time_t = (time_t)unix_time;
+    gmtime_r(&unix_time_t, &timeinfo);
     
-    if (send_ag3335_command(command)) {
-        HAL_DBG_TRACE_INFO("Position assistance sent to AG3335\n");
+    char time_cmd[80];
+    snprintf(time_cmd, sizeof(time_cmd), "$PAIR590,%04d,%02d,%02d,%02d,%02d,%02d",
+             timeinfo.tm_year + 1900,
+             timeinfo.tm_mon + 1,
+             timeinfo.tm_mday,
+             timeinfo.tm_hour,
+             timeinfo.tm_min,
+             timeinfo.tm_sec);
+    
+    if (send_ag3335_command(time_cmd)) {
+        HAL_DBG_TRACE_INFO("UTC time written to AG3335 NVRAM (PAIR590): %04d-%02d-%02d %02d:%02d:%02d\n",
+                           timeinfo.tm_year + 1900,
+                           timeinfo.tm_mon + 1,
+                           timeinfo.tm_mday,
+                           timeinfo.tm_hour,
+                           timeinfo.tm_min,
+                           timeinfo.tm_sec);
         return true;
     } else {
-        HAL_DBG_TRACE_WARNING("Failed to send position assistance\n");
+        HAL_DBG_TRACE_WARNING("Failed to send PAIR590\n");
         return false;
     }
 }
@@ -272,6 +320,53 @@ void vessel_assistance_store_own_fix(int32_t lat, int32_t lon)
                        position_cache.longitude);
 }
 
+bool vessel_assistance_is_gnss_ready(void)
+{
+    // Check 1: Time sync - GPS time error < 3 seconds
+    uint32_t time_uncertainty = vessel_assistance_get_time_uncertainty();
+    if (time_uncertainty >= 3) {
+        HAL_DBG_TRACE_INFO("GNSS not ready - time uncertainty %lu s (need <3s)\n", time_uncertainty);
+        return false;
+    }
+    
+    // Check 2: Fresh almanac - GNSS fix within 14 days
+    if (vessel_assistance_needs_almanac_maintenance(14)) {
+        HAL_DBG_TRACE_INFO("GNSS not ready - almanac maintenance needed (>14 days since fix)\n");
+        return false;
+    }
+    
+    // Check 3: Recent position - valid position within 4 hours
+    if (!position_cache.valid) {
+        HAL_DBG_TRACE_INFO("GNSS not ready - no position data available\n");
+        return false;
+    }
+    
+    uint32_t current_rtc = hal_rtc_get_time_s();
+    uint32_t age_seconds = current_rtc - position_cache.rtc_at_receipt;
+    uint32_t age_hours = age_seconds / 3600;
+    
+    if (age_hours >= 4) {
+        HAL_DBG_TRACE_INFO("GNSS not ready - position age %lu hours (need <4h)\n", age_hours);
+        return false;
+    }
+    
+    // All criteria met - GNSS ready for warm start
+    HAL_DBG_TRACE_INFO("GNSS READY - time OK, almanac fresh, position <4h old\n");
+    return true;
+}
+
+bool vessel_assistance_send_warm_start(void)
+{
+    // PAIR005: Warm start command
+    // Uses almanac data without requiring ephemeris download
+    // Significantly reduces TTFF when conditions are met
+    const char* warm_start_cmd = "$PAIR005";
+    
+    HAL_DBG_TRACE_INFO("Sending GNSS warm start command (PAIR005)\n");
+    
+    return send_ag3335_command(warm_start_cmd);
+}
+
 /*
  * -----------------------------------------------------------------------------
  * --- PRIVATE FUNCTIONS DEFINITION --------------------------------------------
@@ -294,8 +389,26 @@ static bool send_ag3335_command(const char* command)
     char full_command[96];
     uint8_t checksum = calculate_nmea_checksum(command);
     
-    // Format: $PAIR062,lat,lon*checksum\r\n
+    // AG3335 GNSS Module Assistance Capabilities:
+    // - PAIR004: Hot start (uses available ephemeris/almanac)
+    // - PAIR005: Warm start (no ephemeris, uses almanac)
+    // - PAIR006: Cold start (no assistance data)
+    // - PAIR010: Request aiding data from network
+    // - PAIR496-509: EPOC orbit prediction
+    // - PAIR590: UTC time reference (writes to NVRAM)
+    // - PAIR600: Reference position (writes to NVRAM)
+    //
+    // Expected ACK format: $PAIR001,<cmd_num>,0*CS\r\n (0 = success)
+    // Example: $PAIR001,590,0*37 for PAIR590 success
+    //
+    // Note: Current implementation sends 3x for reliability but does not
+    // validate ACK responses. PAIR590/PAIR600 write to NVRAM which persists
+    // across power cycles, so multiple sends ensure data is written.
+    //
+    // Format for NMEA commands: $PAIR_CMD,params*checksum\r\n
     snprintf(full_command, sizeof(full_command), "%s*%02X\r\n", command, checksum);
+    
+    HAL_DBG_TRACE_INFO("Sending AG3335 command: %s*%02X (x3 for reliability)\n", command, checksum);
     
     // Send command multiple times for reliability
     for (uint8_t i = 0; i < 3; i++) {
@@ -304,6 +417,24 @@ static bool send_ag3335_command(const char* command)
     }
     
     return true;
+}
+
+bool vessel_assistance_send_test_position(void)
+{
+    // TEMPORARY TEST POSITION - Algarve, Portugal
+    // Latitude: 37.099775°N
+    // Longitude: 8.460805°W (negative for West)
+    // Altitude: 63m
+    // Accuracy: 50m horizontal, 100m vertical
+    
+    char pos_cmd[96];
+    snprintf(pos_cmd, sizeof(pos_cmd), 
+             "$PAIR600,37.099775,-8.460805,63.0,50.0,50.0,0.0,100.0");
+    
+    HAL_DBG_TRACE_INFO("[TEST] Sending hardcoded position to AG3335 NVRAM\n");
+    HAL_DBG_TRACE_INFO("[TEST] Position: 37.099775°N, 8.460805°W, altitude 63m\n");
+    
+    return send_ag3335_command(pos_cmd);
 }
 
 /* --- EOF ------------------------------------------------------------------ */

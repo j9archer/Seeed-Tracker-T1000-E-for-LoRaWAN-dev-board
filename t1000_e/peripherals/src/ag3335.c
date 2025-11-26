@@ -235,7 +235,32 @@ void gnss_nmea_parse( char *str )
             memcpy( gps_nmea_line, str + begin, end - begin );
             if( strncmp( gps_nmea_line,"$PAIR",5 ) == 0 ) // ag3335 cmd parse
             {
-                //TODO get version
+                // Parse PAIR command responses (acknowledgments)
+                // Format: $PAIR001,<cmd>,<status>*CS
+                // Example: $PAIR001,590,0*37 (PAIR590 success)
+                // Status: 0 = success, non-zero = error
+                if( strncmp( gps_nmea_line, "$PAIR001", 8 ) == 0 )
+                {
+                    // Extract command number and status
+                    int cmd_num = 0;
+                    int status = 0;
+                    if( sscanf( gps_nmea_line, "$PAIR001,%d,%d", &cmd_num, &status ) == 2 )
+                    {
+                        if( status == 0 )
+                        {
+                            GNSS_TRACE_INFO( "AG3335 ACK: PAIR%03d command successful\n", cmd_num );
+                        }
+                        else
+                        {
+                            GNSS_TRACE_INFO( "AG3335 ACK: PAIR%03d command FAILED (status=%d)\n", cmd_num, status );
+                        }
+                    }
+                }
+                else
+                {
+                    // Log other PAIR responses for debugging
+                    GNSS_TRACE_INFO( "AG3335: %s\n", gps_nmea_line );
+                }
             }
             else
             {

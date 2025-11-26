@@ -85,6 +85,7 @@ static uint8_t adr_custom_list_ru864_default[16] = { 0, 0, 0, 1, 1, 1, 2, 2, 2, 
 
 static uint8_t tracker_scan_status = 0;
 static uint32_t tracker_scan_begin = 0;
+static uint32_t last_time_sync_s = 0;  // Track last DeviceTimeReq for periodic resync
 
 uint8_t tracker_scan_type = 0;
 
@@ -177,6 +178,13 @@ static void on_modem_alarm( void );
 static void on_modem_tx_done( smtc_modem_event_txdone_status_t status );
 
 /*!
+ * @brief Time sync event callback
+ *
+ * @param [in] status Time sync status
+ */
+static void on_modem_time_updated( smtc_modem_event_time_status_t status );
+
+/*!
  * @brief Downlink data event callback.
  *
  * @param [in] rssi       RSSI in signed value in dBm + 64
@@ -221,7 +229,7 @@ int main( void )
         .reset                 = on_modem_reset,
         .set_conf              = NULL,
         .stream_done           = NULL,
-        .time_updated_alc_sync = NULL,
+        .time_updated_alc_sync = on_modem_time_updated,
         .tx_done               = on_modem_tx_done,
         .upload_done           = NULL,
     };
@@ -267,6 +275,13 @@ int main( void )
         gnss_init( );
         gnss_scan_start( );
         hal_mcu_wait_ms( 3000 );
+        
+        /* TEMPORARY: Send hardcoded test position to AG3335 NVRAM */
+        /* TODO: Remove this when server position downlink is implemented */
+        /* Must be sent BEFORE gnss_scan_stop() while module is powered */
+        vessel_assistance_send_test_position( );
+        hal_mcu_wait_ms( 500 );  // Allow time for ACK responses
+        
         gnss_scan_stop( );
     }
 
@@ -581,6 +596,12 @@ static void on_modem_network_joined( void )
 
     app_lora_packet_power_on_uplink( );
 
+    /* Start DeviceTimeReq time sync service and trigger request */
+    ASSERT_SMTC_MODEM_RC( smtc_modem_time_start_sync_service( stack_id, SMTC_MODEM_TIME_MAC_SYNC ) );
+    ASSERT_SMTC_MODEM_RC( smtc_modem_time_trigger_sync_request( stack_id ) );
+    last_time_sync_s = hal_rtc_get_time_s();  // Track when we synced
+    HAL_DBG_TRACE_INFO( "DeviceTimeReq triggered after join\n" );
+
     ASSERT_SMTC_MODEM_RC( smtc_modem_alarm_start_timer( 15 ) );
 }
 
@@ -589,6 +610,16 @@ static void on_modem_alarm( void )
     smtc_modem_status_mask_t modem_status;
     ASSERT_SMTC_MODEM_RC( smtc_modem_get_status( stack_id, &modem_status ));
     modem_status_to_string( modem_status );
+    
+    /* Periodic time sync every 4 hours (14400 seconds) */
+    uint32_t current_time_s = hal_rtc_get_time_s();
+    if( last_time_sync_s > 0 && (current_time_s - last_time_sync_s) >= 14400 )
+    {
+        HAL_DBG_TRACE_INFO( "Triggering periodic DeviceTimeReq (4 hour interval)\n" );
+        ASSERT_SMTC_MODEM_RC( smtc_modem_time_trigger_sync_request( stack_id ) );
+        last_time_sync_s = current_time_s;  // Update even if request fails, retry in 4h
+    }
+    
     app_tracker_scan_process( );
 }
 
@@ -605,6 +636,48 @@ static void on_modem_tx_done( smtc_modem_event_txdone_status_t status )
         }
     }
     event_state = 0;
+}
+
+static void on_modem_time_updated( smtc_modem_event_time_status_t status )
+{
+    uint32_t gps_time_s = 0;
+    uint32_t gps_frac_s = 0;
+    
+    /* Get current RTC time */
+    uint32_t rtc_ms = hal_rtc_get_time_ms();
+    uint32_t rtc_s = hal_rtc_get_time_s();
+    
+    if( smtc_modem_get_time( &gps_time_s, &gps_frac_s ) == SMTC_MODEM_RC_OK )
+    {
+        /* Convert GPS time to Unix time for display (GPS epoch Jan 6, 1980 = Unix 315964800) */
+        /* Current leap seconds between GPS and UTC = 18 seconds */
+        uint32_t unix_time = gps_time_s + 315964800 - 18;
+        
+        /* Calculate difference between modem GPS time and local RTC */
+        /* RTC runs in seconds since boot, GPS is absolute time */
+        int32_t time_correction_s = (int32_t)gps_time_s - (int32_t)rtc_s;
+        
+        HAL_DBG_TRACE_INFO( "==== TIME SYNC UPDATE ====\n" );
+        HAL_DBG_TRACE_INFO( "Status: %s\n", 
+                           status == SMTC_MODEM_EVENT_TIME_VALID ? "VALID" :
+                           status == SMTC_MODEM_EVENT_TIME_VALID_BUT_NOT_SYNC ? "VALID_BUT_NOT_SYNC" :
+                           "NOT_VALID" );
+        HAL_DBG_TRACE_INFO( "Network GPS time: %lu.%03lu s\n", gps_time_s, gps_frac_s / 1000 );
+        HAL_DBG_TRACE_INFO( "Network Unix time: %lu (UTC)\n", unix_time );
+        HAL_DBG_TRACE_INFO( "Local RTC: %lu s (%lu ms)\n", rtc_s, rtc_ms );
+        HAL_DBG_TRACE_INFO( "Time correction: %ld s\n", time_correction_s );
+        HAL_DBG_TRACE_INFO( "Modem time is now synchronized with network\n" );
+        HAL_DBG_TRACE_INFO( "========================\n" );
+        
+        /* Note: PAIR590 time command sent during GNSS scans when AG3335 is awake */
+        
+        /* Update last sync timestamp for periodic resync */
+        last_time_sync_s = rtc_s;
+    }
+    else
+    {
+        HAL_DBG_TRACE_WARNING( "Time sync event but failed to get time\n" );
+    }
 }
 
 static void on_modem_down_data( int8_t rssi, int8_t snr, smtc_modem_event_downdata_window_t rx_window, uint8_t port,
@@ -706,9 +779,9 @@ static uint32_t app_get_adaptive_gnss_scan_duration( void )
     // Use vessel assistance to determine optimal scan duration
     uint32_t recommended_duration = vessel_assistance_get_recommended_scan_duration( );
     
-    // Override with user-configured duration if it's longer
-    // (user may have specific requirements)
-    if( gnss_scan_duration > recommended_duration )
+    // Use the shorter duration to optimize battery life
+    // Adaptive duration reduces scan time when GNSS is ready
+    if( gnss_scan_duration < recommended_duration )
     {
         return gnss_scan_duration;
     }
@@ -721,26 +794,66 @@ static void app_tracker_gnss_scan_begin( void )
     tracker_gps_scan_len = 0;
     memset( tracker_gps_scan_data, 0, sizeof( tracker_gps_scan_data ));
     
-    // Apply vessel assistance before starting GNSS scan
-    vessel_assistance_apply_to_gnss( );
-    
+    // Power up the AG3335 module first
     gnss_scan_start( );
+    hal_mcu_wait_ms( 100 );  // Allow module to power up and stabilize
+    
+    // Send current time to AG3335 NVRAM (PAIR590)
+    // MUST be sent while module is powered and UART active
+    vessel_assistance_send_time_to_gnss( );
+    
+    // Check if GNSS is ready for warm start (time sync + fresh almanac + recent position)
+    if( vessel_assistance_is_gnss_ready( ))
+    {
+        // Send PAIR005 warm start command for faster TTFF
+        // Position and time already in AG3335 NVRAM from PAIR590/PAIR600
+        // MUST be sent AFTER gnss_scan_start() while module is powered and UART active
+        vessel_assistance_send_warm_start( );
+        HAL_DBG_TRACE_INFO( "GNSS warm start enabled - expect faster TTFF\n" );
+        hal_mcu_wait_ms( 500 );  // Allow time for ACK responses
+    }
+    else
+    {
+        // Normal start - AG3335 will use NVRAM assistance if available
+        HAL_DBG_TRACE_INFO( "GNSS normal start - using NVRAM assistance if available\n" );
+    }
 }
 
 static void app_tracker_gnss_scan_end( void )
 {
     static int32_t lat = 0, lon = 0;
+    bool is_almanac_maintenance = false;
+    
     gnss_scan_stop( );
+    
+    // Check if this was an almanac maintenance scan
+    if( vessel_assistance_is_charging( ) && vessel_assistance_needs_almanac_maintenance( 14 ))
+    {
+        is_almanac_maintenance = true;
+        HAL_DBG_TRACE_INFO( "Almanac maintenance scan completed - position not sent to prevent MOB alert\n" );
+    }
+    
     if( gnss_get_fix_status( ))
     {
         gnss_get_position( &lat, &lon );
         HAL_DBG_TRACE_PRINTF( "lat: %u, lon: %u\n\n", lat, lon );
-        memcpyr( tracker_gps_scan_data, ( uint8_t *)&lon, 4 );
-        memcpyr( tracker_gps_scan_data + 4, ( uint8_t *)&lat, 4 );
-        tracker_gps_scan_len = 8;
         
-        // Store own GNSS fix as fallback assistance
+        // Always store position for vessel assistance (almanac or normal)
         vessel_assistance_store_own_fix( lat, lon );
+        
+        // Only prepare uplink data if NOT almanac maintenance
+        if( !is_almanac_maintenance )
+        {
+            memcpyr( tracker_gps_scan_data, ( uint8_t *)&lon, 4 );
+            memcpyr( tracker_gps_scan_data + 4, ( uint8_t *)&lat, 4 );
+            tracker_gps_scan_len = 8;
+        }
+        else
+        {
+            // Clear scan data to prevent uplink during almanac maintenance
+            tracker_gps_scan_len = 0;
+            memset( tracker_gps_scan_data, 0, sizeof( tracker_gps_scan_data ));
+        }
     }
     else
     {
@@ -1126,24 +1239,12 @@ static void app_tracker_scan_process( void )
     {
         if( tracker_scan_status == 0 )
         {
-            // Check if almanac maintenance needed while charging - prioritize over BLE
-            if( vessel_assistance_is_charging( ) && vessel_assistance_needs_almanac_maintenance( 14 ))
-            {
-                uint32_t adaptive_duration = app_get_adaptive_gnss_scan_duration( );
-                smtc_modem_alarm_start_timer( adaptive_duration );
-                HAL_DBG_TRACE_PRINTF( "almanac maintenance priority - skip ble\r\ngnss begin, adaptive alarm %d s\n\n", adaptive_duration );
-                tracker_scan_begin = hal_rtc_get_time_s( );
-                app_tracker_gnss_scan_begin( );
-                tracker_scan_status = 2;  // Skip to GNSS-end state
-            }
-            else
-            {
-                smtc_modem_alarm_start_timer( ble_scan_duration );
-                HAL_DBG_TRACE_PRINTF( "ble begin, new alarm %d s\n\n", ble_scan_duration );
-                tracker_scan_begin = hal_rtc_get_time_s( );
-                app_tracker_ble_scan_begin( );
-                tracker_scan_status = 1;
-            }
+            // Always run BLE scan first, even during almanac maintenance
+            smtc_modem_alarm_start_timer( ble_scan_duration );
+            HAL_DBG_TRACE_PRINTF( "ble begin, new alarm %d s\n\n", ble_scan_duration );
+            tracker_scan_begin = hal_rtc_get_time_s( );
+            app_tracker_ble_scan_begin( );
+            tracker_scan_status = 1;
         }
         else if( tracker_scan_status == 1 )
         {
@@ -1178,24 +1279,12 @@ static void app_tracker_scan_process( void )
     {
         if( tracker_scan_status == 0 )
         {
-            // Check if almanac maintenance needed while charging - prioritize over BLE/WiFi
-            if( vessel_assistance_is_charging( ) && vessel_assistance_needs_almanac_maintenance( 14 ))
-            {
-                uint32_t adaptive_duration = app_get_adaptive_gnss_scan_duration( );
-                smtc_modem_alarm_start_timer( adaptive_duration );
-                HAL_DBG_TRACE_PRINTF( "almanac maintenance priority - skip ble/wifi\r\ngnss begin, adaptive alarm %d s\n\n", adaptive_duration );
-                tracker_scan_begin = hal_rtc_get_time_s( );
-                app_tracker_gnss_scan_begin( );
-                tracker_scan_status = 3;  // Skip to GNSS-end state (after BLE+WiFi)
-            }
-            else
-            {
-                smtc_modem_alarm_start_timer( ble_scan_duration );
-                HAL_DBG_TRACE_PRINTF( "ble begin, new alarm %d s\n\n", ble_scan_duration );
-                tracker_scan_begin = hal_rtc_get_time_s( );
-                app_tracker_ble_scan_begin( );
-                tracker_scan_status = 1;
-            }
+            // Always run BLE scan first, even during almanac maintenance
+            smtc_modem_alarm_start_timer( ble_scan_duration );
+            HAL_DBG_TRACE_PRINTF( "ble begin, new alarm %d s\n\n", ble_scan_duration );
+            tracker_scan_begin = hal_rtc_get_time_s( );
+            app_tracker_ble_scan_begin( );
+            tracker_scan_status = 1;
         }
         else if( tracker_scan_status == 1 )
         {

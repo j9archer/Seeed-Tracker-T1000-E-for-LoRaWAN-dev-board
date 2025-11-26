@@ -6,13 +6,13 @@ This feature significantly improves GNSS Time-To-First-Fix (TTFF) performance fo
 
 ## How It Works
 
-### Position and Time Updates from Vessel
+### Position Updates from Vessel
 
-The vessel's relay gateway periodically sends position and time updates to all T1000-E devices via LoRaWAN downlinks:
+The vessel's relay gateway periodically sends position updates to all T1000-E devices via LoRaWAN downlinks:
 
 - **Update Interval**: Every 90-120 minutes
 - **LoRaWAN Port**: 10 (configurable via `VESSEL_ASSISTANCE_PORT`)
-- **Payload Size**: 13 bytes
+- **Payload Size**: 9 bytes
 
 ### Payload Format
 
@@ -21,23 +21,23 @@ typedef struct __attribute__((packed)) {
     uint8_t msg_type;      // 0x01 = Position Update
     int32_t vessel_lat;    // Latitude × 10^7 (degrees)
     int32_t vessel_lon;    // Longitude × 10^7 (degrees)
-    uint32_t unix_time;    // Unix timestamp (seconds since epoch)
 } vessel_position_msg_t;
 ```
 
+**Note**: Time synchronization is handled separately via **DeviceTimeReq** MAC command, which provides superior accuracy compared to downlink timestamps.
+
 ### Example Payload
 
-For vessel at position 37.7749°N, 122.4194°W at time 1700000000:
+For vessel at position 37.7749°N, 122.4194°W:
 
 ```
-01 16 7C 65 B0 C9 E0 F4 90 65 5D 4A 00
+01 16 7C 65 B0 C9 E0 F4 90
 ```
 
 Breakdown:
 - `01`: Message type (position update)
 - `16 7C 65 B0`: Latitude = 377,490,000 (37.7749° × 10^7)
-- `C9 E0 F4 90`: Longitude = -1,224,194,000 (-122.4194° × 10^7)  
-- `65 5D 4A 00`: Unix time = 1,700,000,000
+- `C9 E0 F4 90`: Longitude = -1,224,194,000 (-122.4194° × 10^7)
 
 ## Benefits
 
@@ -119,29 +119,26 @@ static void app_tracker_gnss_scan_end(void) {
 
 ```python
 import struct
-import time
 
 def create_vessel_position_payload(lat, lon):
     """
-    Create vessel position update payload
+    Create vessel position update payload (no timestamp - using DeviceTimeReq instead)
     
     Args:
         lat: Latitude in degrees (float)
         lon: Longitude in degrees (float)
     
     Returns:
-        bytes: 13-byte payload
+        bytes: 9-byte payload
     """
     msg_type = 0x01
     lat_scaled = int(lat * 10000000)
     lon_scaled = int(lon * 10000000)
-    unix_time = int(time.time())
     
-    payload = struct.pack('>BiiI', 
+    payload = struct.pack('>Bii', 
                          msg_type,
                          lat_scaled,
-                         lon_scaled,
-                         unix_time)
+                         lon_scaled)
     
     return payload
 
@@ -155,31 +152,86 @@ for device in active_devices:
     send_downlink(device, payload, port=10, confirmed=False)
 ```
 
+**Note**: Time synchronization is automatic via DeviceTimeReq. The gateway/network server handles this through standard LoRaWAN MAC commands, providing superior accuracy compared to downlink timestamps.
+
 ### Scheduling
 
 Send position updates every 90-120 minutes to ensure devices always have fresh assistance data within the 3-hour validity window.
 
 ## Time Synchronization
 
-### RTC Update
+### DeviceTimeReq MAC Command
 
-When a position update is received, the device automatically updates its RTC:
+The device automatically requests time synchronization from the network:
 
-```c
-hal_rtc_set_time_s(msg->unix_time);
+1. **Initial Sync**: Immediately after LoRaWAN join
+2. **Periodic Sync**: Every 4 hours of runtime
+3. **Method**: DeviceTimeReq MAC command (LoRaWAN 1.0.4 specification)
+4. **Response**: Network provides GPS epoch time via DeviceTimeAns
+5. **Accuracy**: Typically ±1 second (depends on gateway NTP synchronization)
+
+### Clock Architecture
+
+**Hardware Time Source**:
+- **nRF52840 RTC2**: 32.768 kHz crystal oscillator
+- **Accuracy**: ±50 ppm (±4.3 seconds/day, ±0.18 seconds/hour)
+- **Prescaler**: 2 (tick = ~91.5 μs)
+
+**Modem Time Management**:
+The LoRa Basics Modem maintains GPS epoch time by:
+1. Storing the GPS time received from DeviceTimeAns
+2. Using the nRF52840 RTC as the reference clock
+3. Calculating current GPS time as: `GPS_time = base_GPS_time + (current_RTC - reference_RTC)`
+
+**Why DeviceTimeReq is Better Than Downlink Timestamps**:
+- Network time accuracy: ~1 second vs RTC drift of ~0.18 sec/hour
+- No payload overhead (MAC command in FOpts)
+- Automatic resync capability  
+- Industry standard LoRaWAN mechanism
+
+### Time Synchronization Flow
+
+```
+Device                          Network
+  |                               |
+  |--- DeviceTimeReq (after join)-|
+  |                               |
+  |<-- DeviceTimeAns (GPS time) --|
+  |                               |
+  [Modem stores GPS epoch offset] |
+  |                               |
+  [TIME event callback triggered] |
 ```
 
-### Time Uncertainty
+### Monitoring Time Sync
 
-The system tracks time uncertainty based on:
-- Initial uncertainty from downlink queuing: ±60 seconds
-- RTC drift over time: ~0.125 seconds/hour
+The device logs comprehensive time sync information:
 
-Typical time uncertainty:
-- **Just received**: ±60 seconds (excellent for GNSS)
-- **After 1 hour**: ±60 seconds (still excellent)
-- **After 12 hours**: ±62 seconds (very good)
-- **After 24 hours**: ±63 seconds (very good)
+```
+==== TIME SYNC UPDATE ====
+Status: VALID
+Network GPS time: 1447842784.000 s
+Network Unix time: 1763807566 (UTC)
+Local RTC: 188 s (188770 ms)
+Time correction: 1447842596 s
+Modem time is now synchronized with network
+========================
+```
+
+### Time Drift and Accuracy
+
+After DeviceTimeAns synchronization:
+- **Initial accuracy**: ±1 second (network dependent)
+- **Drift rate**: ±0.18 seconds/hour (nRF52840 RTC typical)
+- **After 1 hour**: ±1.2 seconds
+- **After 4 hours**: ±1.7 seconds (before periodic resync)
+
+**Periodic Resync Strategy**:
+The device automatically requests DeviceTimeReq every 4 hours to maintain accuracy:
+- Ensures time accuracy stays within ±2 seconds
+- Optimal for GNSS assistance (requirement: <3 seconds)
+- Minimal network overhead (one MAC command per 4 hours)
+- No manual intervention required
 
 ## Configuration
 
@@ -217,7 +269,9 @@ Position updates and assistance application are logged:
 ```
 [INFO] Vessel position received: 37.774900, -122.419400 @ 1700000000
 [INFO] Applying vessel assistance (EXCELLENT): 37.774900, -122.419400
-[INFO] Position assistance sent to AG3335
+[INFO] UTC time sent to AG3335 (PAIR590)
+[INFO] Position sent to AG3335 (PAIR600)
+[INFO] Vessel assistance applied (PAIR590 + PAIR600)
 [INFO] gnss begin, adaptive alarm 10 s
 ```
 
@@ -232,20 +286,60 @@ if (cache->valid) {
 }
 ```
 
-## AG3335 NMEA Commands
+## AG3335 GNSS Assistance Commands
 
-The system uses the `PAIR062` command to send assistance position to the AG3335:
+The AG3335 chipset supports **direct position and time injection** via proprietary PAIR commands (per SIM68D NMEA documentation):
 
-```
-$PAIR062,lat,lon*checksum\r\n
-```
+### PAIR590 - UTC Time Reference
 
-Example:
+**Command Format:**
 ```
-$PAIR062,37.774900,-122.419400*5A\r\n
+$PAIR590,YYYY,MM,DD,hh,mm,ss*CS<CR><LF>
 ```
 
-This is sent 3 times with 100ms intervals for reliability.
+**Requirements:**
+- **Must use UTC time**, not local time
+- Time accuracy should be **<3 seconds** for optimal TTFF improvement
+- Sent before each GNSS scan to provide current time reference
+
+**Example:**
+```
+$PAIR590,2025,11,21,14,30,45*06
+```
+
+### PAIR600 - Reference Position
+
+**Command Format:**
+```
+$PAIR600,<Lat>,<Lon>,<Height>,<AccMaj>,<AccMin>,<Bear>,<AccVert>*CS<CR><LF>
+```
+
+**Parameters:**
+- `Lat`, `Lon`: Decimal degrees
+- `Height`: Altitude in meters (0.0 if unknown)
+- `AccMaj`, `AccMin`: Horizontal RMS accuracy in meters
+- `Bear`: Bearing of error ellipse in degrees (0.0 for circular)
+- `AccVert`: Vertical RMS accuracy in meters
+
+**Example:**
+```
+$PAIR600,24.772816,121.022636,0.0,50.0,50.0,0.0,100.0*06
+```
+
+**Implementation Notes:**
+- Conservative accuracy estimates: 50m horizontal, 100m vertical
+- Accounts for vessel GPS accuracy (~5-10m) plus age-related drift
+- Altitude set to 0.0 (less critical for 2D GNSS positioning)
+
+### Other AG3335 PAIR Commands
+
+From the Airoha AG3335 specification:
+
+- `PAIR004`: Hot start - uses available ephemeris/almanac
+- `PAIR005`: Warm start - uses almanac only
+- `PAIR006`: Cold start - no assistance data
+- `PAIR010`: Request GNSS system reference data
+- `PAIR496-509`: EPOC orbit prediction (ephemeris data)
 
 ## Performance Monitoring
 
@@ -259,9 +353,10 @@ This is sent 3 times with 100ms intervals for reliability.
 ### Expected Results
 
 With 90-minute update intervals and 1-minute uplinks:
-- 95%+ of GNSS scans will have "Excellent" or "Good" assistance
-- Average TTFF should be 12-18 seconds (vs 60+ seconds cold start)
-- Battery life improvement: 60-70% for GNSS operation
+- 95%+ of GNSS scans will have "Excellent" or "Good" time assistance
+- Improved TTFF through time sync (accuracy depends on vessel clock)
+- Battery life improvement: 20-40% through adaptive scan duration
+- Actual TTFF depends on satellite visibility and ephemeris age
 
 ## Troubleshooting
 
@@ -274,10 +369,12 @@ With 90-minute update intervals and 1-minute uplinks:
 
 ### Poor TTFF Despite Assistance
 
-1. Verify position accuracy (should be < 50km from actual location)
-2. Check time uncertainty (use `vessel_assistance_get_time_uncertainty()`)
-3. Ensure AG3335 UART is functioning correctly
-4. Verify NMEA command is being sent (check debug logs)
+1. Check PAIR590/PAIR600 commands are acknowledged (look for PAIR001 ACK in logs)
+2. Verify time accuracy is <3 seconds (check vessel/gateway clock sync)
+3. Ensure position accuracy estimates are reasonable (50m typical)
+4. Verify AG3335 has valid ephemeris/almanac data
+5. Check satellite visibility and sky conditions
+6. Ensure Hot Start (PAIR004) is being used when possible
 
 ### Assistance Not Being Applied
 
@@ -290,14 +387,16 @@ With 90-minute update intervals and 1-minute uplinks:
 
 Potential improvements for future versions:
 
-1. **Almanac Updates**: Send GNSS almanac data via downlinks
-2. **Motion Compensation**: Account for vessel motion between updates
-3. **Multiple Time Sources**: Combine vessel time with Class B beacons
-4. **Adaptive Update Intervals**: Vary based on vessel speed
-5. **Ephemeris Data**: Send additional satellite data for further TTFF reduction
+1. **EPOC Orbit Prediction**: Utilize AG3335's PAIR496-509 commands for extended ephemeris
+2. **RTCM Differential Corrections**: Use PAIR430-443 for high-precision positioning
+3. **Adaptive Start Mode**: Automatically select Hot/Warm/Cold based on data age
+4. **Motion Compensation**: Account for vessel motion between updates
+5. **Multiple Time Sources**: Combine vessel time with LoRaWAN Class B beacons
+6. **Adaptive Update Intervals**: Vary downlink frequency based on vessel speed
 
 ## References
 
-- AG3335 NMEA Protocol Documentation
+- AG3335 Product Page: https://www.airoha.com/products/p/VXKPfHI9iDCvsRWN
+- LOCOSYS AG3335M/MN Command List v1.1 (SDK 3.2.1)
 - LoRaWAN Specification v1.0.4
-- GNSS Assistance Data Standards (3GPP)
+- ION GNSS+ 2022: "Low Power Dual-frequency Multi-constellation GNSS Receiver Designed for Wearable Applications"

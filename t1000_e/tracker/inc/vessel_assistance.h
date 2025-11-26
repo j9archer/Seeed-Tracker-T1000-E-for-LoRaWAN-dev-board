@@ -4,7 +4,9 @@
  * @brief     Vessel position and time assistance for GNSS
  *
  * Handles position and time updates from vessel relay gateway to improve
- * GNSS Time-To-First-Fix (TTFF) performance.
+ * GNSS Time-To-First-Fix (TTFF) performance using AG3335 PAIR commands:
+ * - PAIR590: UTC time reference (accuracy <3s recommended)
+ * - PAIR600: Position reference (lat/lon/altitude with accuracy estimates)
  */
 
 #ifndef VESSEL_ASSISTANCE_H
@@ -40,13 +42,13 @@ extern "C" {
  */
 
 /*!
- * @brief Vessel position update message (13 bytes)
+ * @brief Vessel position update message (9 bytes)
+ * Note: Time sync handled separately via DeviceTimeReq MAC command
  */
 typedef struct __attribute__((packed)) {
     uint8_t msg_type;      // 0x01 = Position Update
     int32_t vessel_lat;    // Latitude * 10^7
     int32_t vessel_lon;    // Longitude * 10^7
-    uint32_t unix_time;    // Unix timestamp (seconds since epoch)
 } vessel_position_msg_t;
 
 /*!
@@ -65,7 +67,7 @@ typedef enum {
 typedef struct {
     float latitude;              // Vessel latitude in degrees
     float longitude;             // Vessel longitude in degrees
-    uint32_t unix_time;          // Time from vessel (seconds since epoch)
+    uint32_t unix_time;          // Time when position received (from modem GPS time)
     uint32_t rtc_at_receipt;     // Local RTC when message received
     uint32_t time_uncertainty;   // Estimated time uncertainty in seconds
     bool valid;                  // Cache contains valid data
@@ -159,13 +161,14 @@ bool vessel_assistance_needs_almanac_maintenance(uint32_t days_threshold);
 uint32_t vessel_assistance_get_almanac_scan_duration(void);
 
 /*!
- * @brief Apply position assistance to GNSS module
+ * @brief Send time sync to AG3335 GNSS module NVRAM
  *
- * Sends assistance position to AG3335 if available and useful
+ * Called immediately when DeviceTimeAns received via modem time sync callback.
+ * Writes UTC time to AG3335 NVRAM via PAIR590 command.
  *
- * @returns true if assistance was applied
+ * @returns true if time was sent successfully
  */
-bool vessel_assistance_apply_to_gnss(void);
+bool vessel_assistance_send_time_to_gnss(void);
 
 /*!
  * @brief Store own GNSS fix as fallback assistance data
@@ -174,6 +177,42 @@ bool vessel_assistance_apply_to_gnss(void);
  * @param [in] lon Longitude from GNSS fix (scaled by 1e6)
  */
 void vessel_assistance_store_own_fix(int32_t lat, int32_t lon);
+
+/*!
+ * @brief Check if GNSS is ready for warm start
+ *
+ * Evaluates all GNSS Ready criteria:
+ * - Time sync: GPS time error < 3 seconds (DeviceTimeReq valid)
+ * - Fresh almanac: GNSS fix within 14 days
+ * - Recent position: Valid position within 4 hours
+ *
+ * @returns true if all criteria met for warm start
+ */
+bool vessel_assistance_is_gnss_ready(void);
+
+/*!
+ * @brief Send warm start command to AG3335
+ *
+ * Issues PAIR005 command for warm start when GNSS ready conditions are met.
+ * Warm start uses almanac data without requiring ephemeris download.
+ *
+ * @returns true if command was sent successfully
+ */
+bool vessel_assistance_send_warm_start(void);
+
+/*!
+ * @brief Send hardcoded test position to AG3335 (TEMPORARY for testing)
+ *
+ * Sends PAIR600 with hardcoded coordinates for initial testing:
+ * - Latitude: 37.099775°N
+ * - Longitude: 8.460805°W
+ * - Altitude: 63m
+ *
+ * @note This is a temporary function for testing. Remove when server downlink implemented.
+ *
+ * @returns true if command was sent successfully
+ */
+bool vessel_assistance_send_test_position(void);
 
 #ifdef __cplusplus
 }
