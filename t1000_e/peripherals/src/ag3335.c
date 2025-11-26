@@ -1,4 +1,3 @@
-
 #include "smtc_hal.h"
 #include "smtc_hal_dbg_trace.h"
 // Silence redefinition warning and keep local buffer size choice
@@ -35,6 +34,12 @@ static struct minmea_sentence_vtg frame_vtg;
 static struct minmea_sentence_zda frame_zda;
 
 static int32_t latitude_i32 = 0, longitude_i32 = 0, speed_i32 = 0;
+
+// Forward declarations for functions used before their definitions
+static void gnss_scan_clean( void );
+static void gnss_scan_lock_sleep( void );
+static void gnss_scan_unlock_sleep( void );
+static void gnss_scan_enter_rtc_mode( void );
 
 static uint8_t app_nmea_check_sum( char *buf )
 {
@@ -292,49 +297,27 @@ void gnss_init( void )
     hal_gpio_init_in( AG3335_RESETB_OUT, HAL_GPIO_PULL_MODE_UP, HAL_GPIO_IRQ_MODE_OFF, NULL ); // GPS_RESETB_OUT_PIN, gps reset ok, to mcu
 }
 
-void gnss_scan_lock_sleep( void )
+static void gnss_set_navigation_mode( uint8_t mode )
 {
-    char command[32] = { 0 };
-    uint8_t check_sum = app_nmea_check_sum( "$PAIR382,1" );
-    sprintf( command, "$PAIR382,1*%02X\r\n", check_sum );
-    for( uint8_t i = 0; i < 25; i++ )
-    {
-        hal_uart_0_tx(( uint8_t *)command, strlen( command ));
-        hal_mcu_wait_ms( 40 );
-    }
-}
+    char payload[24]  = { 0 };
+    char command[40]  = { 0 };
 
-void gnss_scan_unlock_sleep( void )
-{
-    char command[32] = { 0 };
-    uint8_t check_sum = app_nmea_check_sum( "$PAIR382,0" );
-    sprintf( command, "$PAIR382,0*%02X\r\n", check_sum );
+    // Build PAIR080 payload without checksum
+    // $PAIR080,<CmdType>
+    sprintf( payload, "$PAIR080,%u", mode );
+
+    uint8_t check_sum = app_nmea_check_sum( payload );
+    sprintf( command, "%s*%02X\r\n", payload, check_sum );
+
+    // Send a few times to improve robustness, similar to other PAIR helpers
     for( uint8_t i = 0; i < 4; i++ )
     {
-        hal_uart_0_tx(( uint8_t *)command, strlen( command ));
+        hal_uart_0_tx( ( uint8_t * ) command, strlen( command ) );
         hal_mcu_wait_ms( 40 );
     }
-}
 
-void gnss_scan_enter_rtc_mode( void )
-{
-    char *command = "$PAIR650,0*25\r\n";
-    for( uint8_t i = 0; i < 25; i++ )
-    {
-        hal_uart_0_tx(( uint8_t *)command, strlen( command ));
-        hal_mcu_wait_ms( 40 );
-    }
+    GNSS_TRACE_INFO( "GNSS: navigation mode set to %u (PAIR080)\n", mode );
 }
-
-void gnss_scan_clean( void )
-{
-    memset( &frame_rmc, 0, sizeof( struct minmea_sentence_rmc ));
-    memset( &frame_gga, 0, sizeof( struct minmea_sentence_gga ));
-    memset( &frame_gst, 0, sizeof( struct minmea_sentence_gst ));
-    memset( &frame_gsv, 0, sizeof( struct minmea_sentence_gsv ));
-    memset( &frame_vtg, 0, sizeof( struct minmea_sentence_vtg ));
-    memset( &frame_zda, 0, sizeof( struct minmea_sentence_zda ));
-}  
 
 bool gnss_scan_start( void )
 {
@@ -356,6 +339,10 @@ bool gnss_scan_start( void )
 
     gnss_scan_lock_sleep( );
     GNSS_TRACE_INFO( "GNSS: lock sleep (active tracking)\n" );
+
+    // Set navigation to Swimming mode (CmdType = 7) for MOB/PIW use-case
+    gnss_set_navigation_mode( 7 );
+
     return true;
 }
 
@@ -370,6 +357,50 @@ void gnss_scan_stop( void )
     GNSS_TRACE_INFO( "GNSS: POWER_EN -> OFF (scan_stop)\n" );
     hal_uart_0_deinit( );
 }
+
+static void gnss_scan_lock_sleep( void )
+{
+    char command[32] = { 0 };
+    uint8_t check_sum = app_nmea_check_sum( "$PAIR382,1" );
+    sprintf( command, "$PAIR382,1*%02X\r\n", check_sum );
+    for( uint8_t i = 0; i < 25; i++ )
+    {
+        hal_uart_0_tx(( uint8_t *)command, strlen( command ));
+        hal_mcu_wait_ms( 40 );
+    }
+}
+
+static void gnss_scan_unlock_sleep( void )
+{
+    char command[32] = { 0 };
+    uint8_t check_sum = app_nmea_check_sum( "$PAIR382,0" );
+    sprintf( command, "$PAIR382,0*%02X\r\n", check_sum );
+    for( uint8_t i = 0; i < 4; i++ )
+    {
+        hal_uart_0_tx(( uint8_t *)command, strlen( command ));
+        hal_mcu_wait_ms( 40 );
+    }
+}
+
+static void gnss_scan_enter_rtc_mode( void )
+{
+    char *command = "$PAIR650,0*25\r\n";
+    for( uint8_t i = 0; i < 25; i++ )
+    {
+        hal_uart_0_tx(( uint8_t *)command, strlen( command ));
+        hal_mcu_wait_ms( 40 );
+    }
+}
+
+static void gnss_scan_clean( void )
+{
+    memset( &frame_rmc, 0, sizeof( struct minmea_sentence_rmc ));
+    memset( &frame_gga, 0, sizeof( struct minmea_sentence_gga ));
+    memset( &frame_gst, 0, sizeof( struct minmea_sentence_gst ));
+    memset( &frame_gsv, 0, sizeof( struct minmea_sentence_gsv ));
+    memset( &frame_vtg, 0, sizeof( struct minmea_sentence_vtg ));
+    memset( &frame_zda, 0, sizeof( struct minmea_sentence_zda ));
+}  
 
 bool gnss_get_fix_status( void )
 {

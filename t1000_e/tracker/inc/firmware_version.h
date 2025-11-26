@@ -19,17 +19,23 @@ extern "C" {
 #define FIRMWARE_VERSION_MAJOR      1
 #define FIRMWARE_VERSION_MINOR      0
 #define FIRMWARE_VERSION_PATCH      0
-#define FIRMWARE_VERSION_BUILD      3
+#define FIRMWARE_VERSION_BUILD      4
 
-// Version string (e.g., "1.0.0-b3")
-#define FIRMWARE_VERSION_STRING     "1.0.0-b3"
+// Version string (e.g., "1.0.0-b4")
+#define FIRMWARE_VERSION_STRING     "1.0.0-b4"
 
 // Version features (changelog for this version)
-#define FIRMWARE_VERSION_FEATURES   "AG3335 PAIR590/PAIR600 assistance"
+#define FIRMWARE_VERSION_FEATURES   "GNSS timing fixes, Swimming nav mode"
 
 /*
  * Version History:
  * 
+ * v1.0.0-b4 (2025-11-26)
+ *   - FIXED: Adaptive GNSS scan duration now uses MIN (user config as upper bound)
+ *   - FIXED: PAIR590 UTC time injection moved to GNSS scan start (was sent when asleep)
+ *   - ADDED: PAIR080 Swimming navigation mode (mode=7) for MOB/PIW use-case
+ *   - ADDED: PAIR001 ACK response parsing with status logging
+ *
  * v1.0.0-b3 (2025-11-21)
  *   - ADDED: PAIR590 - UTC time injection to AG3335 (SIM68D NMEA spec)
  *   - ADDED: PAIR600 - Reference position injection to AG3335 (SIM68D NMEA spec)
