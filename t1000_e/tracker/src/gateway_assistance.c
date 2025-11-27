@@ -1,7 +1,7 @@
 /*!
- * @file      vessel_assistance.c
+ * @file      gateway_assistance.c
  *
- * @brief     Vessel position and time assistance for GNSS implementation
+ * @brief     Gateway position and time assistance for GNSS implementation
  */
 
 /*
@@ -9,7 +9,7 @@
  * --- DEPENDENCIES ------------------------------------------------------------
  */
 
-#include "vessel_assistance.h"
+#include "gateway_assistance.h"
 #include "smtc_hal.h"
 #include "smtc_hal_gpio.h"
 #include "smtc_hal_config.h"
@@ -33,6 +33,10 @@
 #define GNSS_SCAN_DURATION_GOOD         15   // Seconds
 #define GNSS_SCAN_DURATION_FAIR         25   // Seconds
 #define GNSS_SCAN_DURATION_COLD         60   // Seconds
+
+// GNSS power up timing
+#define GNSS_POWER_UP_DELAY_MS          500  // Time to wait after power on
+#define GNSS_CMD_ACK_TIMEOUT_MS         200  // Time to wait for ACK
 
 /*
  * -----------------------------------------------------------------------------
@@ -60,37 +64,39 @@ static position_time_cache_t position_cache = {
 
 static uint8_t calculate_nmea_checksum(const char* sentence);
 static bool send_ag3335_command(const char* command);
+static void gnss_power_on_for_command(void);
+static void gnss_power_off_after_command(void);
 
 /*
  * -----------------------------------------------------------------------------
  * --- PUBLIC FUNCTIONS DEFINITION ---------------------------------------------
  */
 
-void vessel_assistance_init(void)
+void gateway_assistance_init(void)
 {
     memset(&position_cache, 0, sizeof(position_cache));
     position_cache.valid = false;
     
-    HAL_DBG_TRACE_INFO("Vessel assistance system initialized\n");
+    HAL_DBG_TRACE_INFO("Gateway assistance system initialized\n");
 }
 
-bool vessel_assistance_handle_downlink(const uint8_t* payload, uint8_t size)
+bool gateway_assistance_handle_downlink(const uint8_t* payload, uint8_t size)
 {
-    if (payload == NULL || size < sizeof(vessel_position_msg_t)) {
+    if (payload == NULL || size < sizeof(gateway_position_msg_t)) {
         return false;
     }
     
-    const vessel_position_msg_t* msg = (const vessel_position_msg_t*)payload;
+    const gateway_position_msg_t* msg = (const gateway_position_msg_t*)payload;
     
     // Verify message type
     if (msg->msg_type != 0x01) {
-        HAL_DBG_TRACE_WARNING("Unknown vessel message type: 0x%02X\n", msg->msg_type);
+        HAL_DBG_TRACE_WARNING("Unknown gateway message type: 0x%02X\n", msg->msg_type);
         return false;
     }
     
     // Extract position from downlink
-    position_cache.latitude = msg->vessel_lat / 10000000.0f;
-    position_cache.longitude = msg->vessel_lon / 10000000.0f;
+    position_cache.latitude = msg->gateway_lat / 10000000.0f;
+    position_cache.longitude = msg->gateway_lon / 10000000.0f;
     
     // Get current GPS time from modem (set via DeviceTimeReq)
     uint32_t gps_time_s = 0;
@@ -108,46 +114,34 @@ bool vessel_assistance_handle_downlink(const uint8_t* payload, uint8_t size)
     position_cache.rtc_at_receipt = hal_rtc_get_time_s();
     position_cache.valid = true;
     
-    HAL_DBG_TRACE_INFO("Vessel position received: %.6f, %.6f @ %u (GPS time)\n",
+    HAL_DBG_TRACE_INFO("Gateway position received: %.6f, %.6f @ %u (GPS time)\n",
                        position_cache.latitude,
                        position_cache.longitude,
                        position_cache.unix_time);
     
-    // Send PAIR600 command immediately to AG3335 NVRAM
-    // Format: $PAIR600,lat,lon,height,accMaj,accMin,bear,accVert*CS
-    // Using conservative 50m horizontal / 100m vertical accuracy
-    char pos_cmd[120];
-    snprintf(pos_cmd, sizeof(pos_cmd), 
-             "$PAIR600,%.6f,%.6f,0.0,50.0,50.0,0.0,100.0",
-             position_cache.latitude,
-             position_cache.longitude);
-    
-    if (send_ag3335_command(pos_cmd)) {
-        HAL_DBG_TRACE_INFO("Position written to AG3335 NVRAM (PAIR600)\n");
-    } else {
-        HAL_DBG_TRACE_WARNING("Failed to send PAIR600\n");
-    }
+    // Send PAIR600 command to AG3335 NVRAM (with power cycling if needed)
+    gateway_assistance_send_position_to_gnss(false);
     
     return true;
 }
 
-const position_time_cache_t* vessel_assistance_get_cache(void)
+const position_time_cache_t* gateway_assistance_get_cache(void)
 {
     return &position_cache;
 }
 
-bool vessel_assistance_is_available(void)
+bool gateway_assistance_is_available(void)
 {
     if (!position_cache.valid) {
         return false;
     }
     
     // Check if assistance is still useful (< 3 hours old)
-    assistance_quality_t quality = vessel_assistance_get_quality();
+    assistance_quality_t quality = gateway_assistance_get_quality();
     return quality != ASSISTANCE_POOR;
 }
 
-assistance_quality_t vessel_assistance_get_quality(void)
+assistance_quality_t gateway_assistance_get_quality(void)
 {
     if (!position_cache.valid) {
         return ASSISTANCE_POOR;
@@ -168,7 +162,7 @@ assistance_quality_t vessel_assistance_get_quality(void)
     }
 }
 
-uint32_t vessel_assistance_get_estimated_time(void)
+uint32_t gateway_assistance_get_estimated_time(void)
 {
     if (!position_cache.valid) {
         return hal_rtc_get_time_s();
@@ -180,7 +174,7 @@ uint32_t vessel_assistance_get_estimated_time(void)
     return position_cache.unix_time + elapsed;
 }
 
-uint32_t vessel_assistance_get_time_uncertainty(void)
+uint32_t gateway_assistance_get_time_uncertainty(void)
 {
     if (!position_cache.valid) {
         return 3600; // 1 hour if no data
@@ -195,9 +189,9 @@ uint32_t vessel_assistance_get_time_uncertainty(void)
     return position_cache.time_uncertainty + drift_uncertainty;
 }
 
-uint32_t vessel_assistance_get_recommended_scan_duration(void)
+uint32_t gateway_assistance_get_recommended_scan_duration(void)
 {
-    assistance_quality_t quality = vessel_assistance_get_quality();
+    assistance_quality_t quality = gateway_assistance_get_quality();
     
     switch (quality) {
         case ASSISTANCE_EXCELLENT:
@@ -211,13 +205,13 @@ uint32_t vessel_assistance_get_recommended_scan_duration(void)
     }
 }
 
-bool vessel_assistance_is_charging(void)
+bool gateway_assistance_is_charging(void)
 {
     // Check if USB/charger is connected
     return (hal_gpio_get_value(CHARGER_ADC_DET) != 0);
 }
 
-bool vessel_assistance_needs_almanac_maintenance(uint32_t days_threshold)
+bool gateway_assistance_needs_almanac_maintenance(uint32_t days_threshold)
 {
     if (!position_cache.valid) {
         // No fix ever received - almanac is likely stale, maintenance needed
@@ -237,19 +231,17 @@ bool vessel_assistance_needs_almanac_maintenance(uint32_t days_threshold)
     return false;
 }
 
-uint32_t vessel_assistance_get_almanac_scan_duration(void)
+uint32_t gateway_assistance_get_almanac_scan_duration(void)
 {
     // Extended duration for almanac download
     // 750 seconds (12.5 minutes) allows full almanac download from one satellite
     return 750;
 }
 
-bool vessel_assistance_send_time_to_gnss(void)
+bool gateway_assistance_send_time_to_gnss(bool gnss_is_active)
 {
     // Send UTC time to AG3335 NVRAM via PAIR590
-    // Called immediately when DeviceTimeAns received
     // Format: $PAIR590,YYYY,MM,DD,hh,mm,ss*CS
-    // Note: Must use UTC, not local time. Accuracy <3 seconds recommended.
     
     // Get current GPS time from modem (just updated by DeviceTimeAns)
     uint32_t gps_time_s = 0;
@@ -281,7 +273,15 @@ bool vessel_assistance_send_time_to_gnss(void)
              timeinfo.tm_min,
              timeinfo.tm_sec);
     
-    if (send_ag3335_command(time_cmd)) {
+    // Power cycle if GNSS not active
+    if (!gnss_is_active) {
+        HAL_DBG_TRACE_INFO("GNSS not active - powering on for PAIR590\n");
+        gnss_power_on_for_command();
+    }
+    
+    bool result = send_ag3335_command(time_cmd);
+    
+    if (result) {
         HAL_DBG_TRACE_INFO("UTC time written to AG3335 NVRAM (PAIR590): %04d-%02d-%02d %02d:%02d:%02d\n",
                            timeinfo.tm_year + 1900,
                            timeinfo.tm_mon + 1,
@@ -289,20 +289,64 @@ bool vessel_assistance_send_time_to_gnss(void)
                            timeinfo.tm_hour,
                            timeinfo.tm_min,
                            timeinfo.tm_sec);
-        return true;
     } else {
         HAL_DBG_TRACE_WARNING("Failed to send PAIR590\n");
-        return false;
     }
+    
+    // Power off if we powered it on
+    if (!gnss_is_active) {
+        gnss_power_off_after_command();
+    }
+    
+    return result;
 }
 
-void vessel_assistance_store_own_fix(int32_t lat, int32_t lon)
+bool gateway_assistance_send_position_to_gnss(bool gnss_is_active)
 {
-    // Only update if no vessel data, or vessel data is very old
+    if (!position_cache.valid) {
+        HAL_DBG_TRACE_WARNING("No position data to send to GNSS\n");
+        return false;
+    }
+    
+    // Format: $PAIR600,lat,lon,height,accMaj,accMin,bear,accVert*CS
+    // Using conservative 50m horizontal / 100m vertical accuracy
+    char pos_cmd[120];
+    snprintf(pos_cmd, sizeof(pos_cmd), 
+             "$PAIR600,%.6f,%.6f,0.0,50.0,50.0,0.0,100.0",
+             position_cache.latitude,
+             position_cache.longitude);
+    
+    // Power cycle if GNSS not active
+    if (!gnss_is_active) {
+        HAL_DBG_TRACE_INFO("GNSS not active - powering on for PAIR600\n");
+        gnss_power_on_for_command();
+    }
+    
+    bool result = send_ag3335_command(pos_cmd);
+    
+    if (result) {
+        HAL_DBG_TRACE_INFO("Position written to AG3335 NVRAM (PAIR600): %.6f, %.6f\n",
+                           position_cache.latitude,
+                           position_cache.longitude);
+    } else {
+        HAL_DBG_TRACE_WARNING("Failed to send PAIR600\n");
+    }
+    
+    // Power off if we powered it on
+    if (!gnss_is_active) {
+        gnss_power_off_after_command();
+    }
+    
+    return result;
+}
+
+void gateway_assistance_store_own_fix(int32_t lat, int32_t lon)
+{
+    // Only update if no gateway data, or gateway data is very old
     if (position_cache.valid) {
-        assistance_quality_t quality = vessel_assistance_get_quality();
+        assistance_quality_t quality = gateway_assistance_get_quality();
         if (quality != ASSISTANCE_POOR) {
-            // Vessel data is still good, don't override
+            // Gateway data is still good, don't override
             return;
         }
     }
@@ -312,7 +356,7 @@ void vessel_assistance_store_own_fix(int32_t lat, int32_t lon)
     position_cache.longitude = lon / 1000000.0f;
     position_cache.unix_time = hal_rtc_get_time_s();
     position_cache.rtc_at_receipt = hal_rtc_get_time_s();
-    position_cache.time_uncertainty = vessel_assistance_get_time_uncertainty();
+    position_cache.time_uncertainty = gateway_assistance_get_time_uncertainty();
     position_cache.valid = true;
     
     HAL_DBG_TRACE_INFO("Stored own GNSS fix as assistance: %.6f, %.6f\n",
@@ -320,17 +364,17 @@ void vessel_assistance_store_own_fix(int32_t lat, int32_t lon)
                        position_cache.longitude);
 }
 
-bool vessel_assistance_is_gnss_ready(void)
+bool gateway_assistance_is_gnss_ready(void)
 {
     // Check 1: Time sync - GPS time error < 3 seconds
-    uint32_t time_uncertainty = vessel_assistance_get_time_uncertainty();
+    uint32_t time_uncertainty = gateway_assistance_get_time_uncertainty();
     if (time_uncertainty >= 3) {
         HAL_DBG_TRACE_INFO("GNSS not ready - time uncertainty %lu s (need <3s)\n", time_uncertainty);
         return false;
     }
     
     // Check 2: Fresh almanac - GNSS fix within 14 days
-    if (vessel_assistance_needs_almanac_maintenance(14)) {
+    if (gateway_assistance_needs_almanac_maintenance(14)) {
         HAL_DBG_TRACE_INFO("GNSS not ready - almanac maintenance needed (>14 days since fix)\n");
         return false;
     }
@@ -355,16 +399,48 @@ bool vessel_assistance_is_gnss_ready(void)
     return true;
 }
 
-bool vessel_assistance_send_warm_start(void)
+bool gateway_assistance_send_warm_start(void)
 {
     // PAIR005: Warm start command
     // Uses almanac data without requiring ephemeris download
     // Significantly reduces TTFF when conditions are met
+    // Best for MOB burst mode where speed is priority
     const char* warm_start_cmd = "$PAIR005";
     
     HAL_DBG_TRACE_INFO("Sending GNSS warm start command (PAIR005)\n");
     
     return send_ag3335_command(warm_start_cmd);
+}
+
+bool gateway_assistance_send_hot_start(void)
+{
+    // PAIR004: Hot start command
+    // Uses ephemeris if available for fastest TTFF
+    // Falls back to warm start behavior if ephemeris not available
+    // Best for PIW phases where device had recent fix
+    const char* hot_start_cmd = "$PAIR004";
+    
+    HAL_DBG_TRACE_INFO("Sending GNSS hot start command (PAIR004)\n");
+    
+    return send_ag3335_command(hot_start_cmd);
+}
+
+bool gateway_assistance_send_test_position(void)
+{
+    // TEMPORARY TEST POSITION - Algarve, Portugal
+    // Latitude: 37.099775°N
+    // Longitude: 8.460805°W (negative for West)
+    // Altitude: 63m
+    // Accuracy: 50m horizontal, 100m vertical
+    
+    char pos_cmd[96];
+    snprintf(pos_cmd, sizeof(pos_cmd), 
+             "$PAIR600,37.099775,-8.460805,63.0,50.0,50.0,0.0,100.0");
+    
+    HAL_DBG_TRACE_INFO("[TEST] Sending hardcoded position to AG3335 NVRAM\n");
+    HAL_DBG_TRACE_INFO("[TEST] Position: 37.099775°N, 8.460805°W, altitude 63m\n");
+    
+    return send_ag3335_command(pos_cmd);
 }
 
 /*
@@ -386,7 +462,7 @@ static uint8_t calculate_nmea_checksum(const char* sentence)
 
 static bool send_ag3335_command(const char* command)
 {
-    char full_command[96];
+    char full_command[128];
     uint8_t checksum = calculate_nmea_checksum(command);
     
     // AG3335 GNSS Module Assistance Capabilities:
@@ -401,10 +477,6 @@ static bool send_ag3335_command(const char* command)
     // Expected ACK format: $PAIR001,<cmd_num>,0*CS\r\n (0 = success)
     // Example: $PAIR001,590,0*37 for PAIR590 success
     //
-    // Note: Current implementation sends 3x for reliability but does not
-    // validate ACK responses. PAIR590/PAIR600 write to NVRAM which persists
-    // across power cycles, so multiple sends ensure data is written.
-    //
     // Format for NMEA commands: $PAIR_CMD,params*checksum\r\n
     snprintf(full_command, sizeof(full_command), "%s*%02X\r\n", command, checksum);
     
@@ -413,28 +485,53 @@ static bool send_ag3335_command(const char* command)
     // Send command multiple times for reliability
     for (uint8_t i = 0; i < 3; i++) {
         hal_uart_0_tx((uint8_t*)full_command, strlen(full_command));
-        hal_mcu_wait_ms(100);
+        hal_mcu_wait_ms(GNSS_CMD_ACK_TIMEOUT_MS);
     }
     
     return true;
 }
 
-bool vessel_assistance_send_test_position(void)
+static void gnss_power_on_for_command(void)
 {
-    // TEMPORARY TEST POSITION - Algarve, Portugal
-    // Latitude: 37.099775°N
-    // Longitude: 8.460805°W (negative for West)
-    // Altitude: 63m
-    // Accuracy: 50m horizontal, 100m vertical
+    // Power on AG3335 module for NVRAM command
+    // Same sequence as gnss_scan_start() but we don't init the full module
     
-    char pos_cmd[96];
-    snprintf(pos_cmd, sizeof(pos_cmd), 
-             "$PAIR600,37.099775,-8.460805,63.0,50.0,50.0,0.0,100.0");
+    // Enable VRTC (backup power)
+    hal_gpio_set_value(AG3335_VRTC_EN, 1);
+    hal_mcu_wait_ms(10);
     
-    HAL_DBG_TRACE_INFO("[TEST] Sending hardcoded position to AG3335 NVRAM\n");
-    HAL_DBG_TRACE_INFO("[TEST] Position: 37.099775°N, 8.460805°W, altitude 63m\n");
+    // Enable main power
+    hal_gpio_set_value(AG3335_POWER_EN, 1);
+    hal_mcu_wait_ms(50);
     
-    return send_ag3335_command(pos_cmd);
+    // Release reset
+    hal_gpio_set_value(AG3335_RESET, 1);
+    
+    // Wait for module to be ready
+    hal_mcu_wait_ms(GNSS_POWER_UP_DELAY_MS);
+    
+    // Initialize UART for communication
+    hal_uart_0_init();
+    
+    HAL_DBG_TRACE_INFO("AG3335 powered on for NVRAM command\n");
+}
+
+static void gnss_power_off_after_command(void)
+{
+    // Wait for any pending UART transmission
+    hal_mcu_wait_ms(100);
+    
+    // Deinitialize UART
+    hal_uart_0_deinit();
+    
+    // Assert reset
+    hal_gpio_set_value(AG3335_RESET, 0);
+    hal_mcu_wait_ms(10);
+    
+    // Power off main power (keep VRTC for NVRAM retention)
+    hal_gpio_set_value(AG3335_POWER_EN, 0);
+    
+    HAL_DBG_TRACE_INFO("AG3335 powered off after NVRAM command\n");
 }
 
 /* --- EOF ------------------------------------------------------------------ */

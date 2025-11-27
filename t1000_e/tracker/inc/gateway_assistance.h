@@ -1,16 +1,21 @@
 /*!
- * @file      vessel_assistance.h
+ * @file      gateway_assistance.h
  *
- * @brief     Vessel position and time assistance for GNSS
+ * @brief     Gateway position and time assistance for GNSS
  *
- * Handles position and time updates from vessel relay gateway to improve
+ * Handles position and time updates from relay gateway to improve
  * GNSS Time-To-First-Fix (TTFF) performance using AG3335 PAIR commands:
+ * - PAIR004: Hot start (fast restart with valid ephemeris)
+ * - PAIR005: Warm start (uses almanac, no ephemeris)
  * - PAIR590: UTC time reference (accuracy <3s recommended)
  * - PAIR600: Position reference (lat/lon/altitude with accuracy estimates)
+ *
+ * When device is NOT in GNSS mode (BLE or WiFi mode), PAIR590/600 commands
+ * will power on the GNSS module, send commands, wait for ACK, and power off.
  */
 
-#ifndef VESSEL_ASSISTANCE_H
-#define VESSEL_ASSISTANCE_H
+#ifndef GATEWAY_ASSISTANCE_H
+#define GATEWAY_ASSISTANCE_H
 
 #ifdef __cplusplus
 extern "C" {
@@ -29,7 +34,7 @@ extern "C" {
  * --- PUBLIC MACROS -----------------------------------------------------------
  */
 
-#define VESSEL_ASSISTANCE_PORT 10  // LoRaWAN port for vessel assistance messages
+#define GATEWAY_ASSISTANCE_PORT 10  // LoRaWAN port for gateway assistance messages
 
 /*
  * -----------------------------------------------------------------------------
@@ -42,14 +47,14 @@ extern "C" {
  */
 
 /*!
- * @brief Vessel position update message (9 bytes)
+ * @brief Gateway position update message (9 bytes)
  * Note: Time sync handled separately via DeviceTimeReq MAC command
  */
 typedef struct __attribute__((packed)) {
-    uint8_t msg_type;      // 0x01 = Position Update
-    int32_t vessel_lat;    // Latitude * 10^7
-    int32_t vessel_lon;    // Longitude * 10^7
-} vessel_position_msg_t;
+    uint8_t msg_type;        // 0x01 = Position Update
+    int32_t gateway_lat;     // Latitude * 10^7
+    int32_t gateway_lon;     // Longitude * 10^7
+} gateway_position_msg_t;
 
 /*!
  * @brief Assistance quality levels
@@ -65,8 +70,8 @@ typedef enum {
  * @brief Position and time cache structure
  */
 typedef struct {
-    float latitude;              // Vessel latitude in degrees
-    float longitude;             // Vessel longitude in degrees
+    float latitude;              // Gateway latitude in degrees
+    float longitude;             // Gateway longitude in degrees
     uint32_t unix_time;          // Time when position received (from modem GPS time)
     uint32_t rtc_at_receipt;     // Local RTC when message received
     uint32_t time_uncertainty;   // Estimated time uncertainty in seconds
@@ -79,68 +84,68 @@ typedef struct {
  */
 
 /*!
- * @brief Initialize vessel assistance system
+ * @brief Initialize gateway assistance system
  */
-void vessel_assistance_init(void);
+void gateway_assistance_init(void);
 
 /*!
- * @brief Handle vessel position downlink message
+ * @brief Handle gateway position downlink message
  *
  * @param [in] payload Downlink payload
  * @param [in] size Payload size in bytes
  *
  * @returns true if message was valid and processed
  */
-bool vessel_assistance_handle_downlink(const uint8_t* payload, uint8_t size);
+bool gateway_assistance_handle_downlink(const uint8_t* payload, uint8_t size);
 
 /*!
  * @brief Get current position assistance cache
  *
  * @returns Pointer to position/time cache (read-only)
  */
-const position_time_cache_t* vessel_assistance_get_cache(void);
+const position_time_cache_t* gateway_assistance_get_cache(void);
 
 /*!
  * @brief Check if assistance data is available and useful
  *
  * @returns true if assistance should be used
  */
-bool vessel_assistance_is_available(void);
+bool gateway_assistance_is_available(void);
 
 /*!
  * @brief Get assistance quality level
  *
  * @returns Assistance quality enumeration
  */
-assistance_quality_t vessel_assistance_get_quality(void);
+assistance_quality_t gateway_assistance_get_quality(void);
 
 /*!
  * @brief Get estimated current time based on cache and RTC
  *
  * @returns Estimated current Unix time in seconds
  */
-uint32_t vessel_assistance_get_estimated_time(void);
+uint32_t gateway_assistance_get_estimated_time(void);
 
 /*!
  * @brief Get time uncertainty in seconds
  *
  * @returns Estimated time uncertainty in seconds
  */
-uint32_t vessel_assistance_get_time_uncertainty(void);
+uint32_t gateway_assistance_get_time_uncertainty(void);
 
 /*!
  * @brief Get recommended GNSS scan duration based on assistance quality
  *
  * @returns Recommended scan duration in seconds
  */
-uint32_t vessel_assistance_get_recommended_scan_duration(void);
+uint32_t gateway_assistance_get_recommended_scan_duration(void);
 
 /*!
  * @brief Check if device is currently charging
  *
  * @returns true if USB/charger connected, false otherwise
  */
-bool vessel_assistance_is_charging(void);
+bool gateway_assistance_is_charging(void);
 
 /*!
  * @brief Check if almanac maintenance is needed
@@ -148,7 +153,7 @@ bool vessel_assistance_is_charging(void);
  * @param [in] days_threshold Number of days without GNSS fix before maintenance needed
  * @returns true if almanac maintenance should be performed
  */
-bool vessel_assistance_needs_almanac_maintenance(uint32_t days_threshold);
+bool gateway_assistance_needs_almanac_maintenance(uint32_t days_threshold);
 
 /*!
  * @brief Get extended scan duration for almanac download
@@ -158,17 +163,41 @@ bool vessel_assistance_needs_almanac_maintenance(uint32_t days_threshold);
  *
  * @returns Extended scan duration in seconds (750s = 12.5 minutes)
  */
-uint32_t vessel_assistance_get_almanac_scan_duration(void);
+uint32_t gateway_assistance_get_almanac_scan_duration(void);
 
 /*!
  * @brief Send time sync to AG3335 GNSS module NVRAM
  *
- * Called immediately when DeviceTimeAns received via modem time sync callback.
- * Writes UTC time to AG3335 NVRAM via PAIR590 command.
+ * When called while NOT in GNSS mode, this will:
+ * 1. Power on the AG3335 module
+ * 2. Wait for module ready
+ * 3. Send PAIR590 UTC time command
+ * 4. Wait for ACK
+ * 5. Power off the module
  *
+ * When called during GNSS scan (module already powered), just sends command.
+ *
+ * @param [in] gnss_is_active true if GNSS scan is in progress (module powered)
  * @returns true if time was sent successfully
  */
-bool vessel_assistance_send_time_to_gnss(void);
+bool gateway_assistance_send_time_to_gnss(bool gnss_is_active);
+
+/*!
+ * @brief Send position to AG3335 GNSS module NVRAM
+ *
+ * When called while NOT in GNSS mode, this will:
+ * 1. Power on the AG3335 module
+ * 2. Wait for module ready
+ * 3. Send PAIR600 position command
+ * 4. Wait for ACK
+ * 5. Power off the module
+ *
+ * When called during GNSS scan (module already powered), just sends command.
+ *
+ * @param [in] gnss_is_active true if GNSS scan is in progress (module powered)
+ * @returns true if position was sent successfully
+ */
+bool gateway_assistance_send_position_to_gnss(bool gnss_is_active);
 
 /*!
  * @brief Store own GNSS fix as fallback assistance data
@@ -176,7 +205,7 @@ bool vessel_assistance_send_time_to_gnss(void);
  * @param [in] lat Latitude from GNSS fix (scaled by 1e6)
  * @param [in] lon Longitude from GNSS fix (scaled by 1e6)
  */
-void vessel_assistance_store_own_fix(int32_t lat, int32_t lon);
+void gateway_assistance_store_own_fix(int32_t lat, int32_t lon);
 
 /*!
  * @brief Check if GNSS is ready for warm start
@@ -188,17 +217,29 @@ void vessel_assistance_store_own_fix(int32_t lat, int32_t lon);
  *
  * @returns true if all criteria met for warm start
  */
-bool vessel_assistance_is_gnss_ready(void);
+bool gateway_assistance_is_gnss_ready(void);
 
 /*!
- * @brief Send warm start command to AG3335
+ * @brief Send warm start command to AG3335 (PAIR005)
  *
- * Issues PAIR005 command for warm start when GNSS ready conditions are met.
  * Warm start uses almanac data without requiring ephemeris download.
+ * Best for MOB burst mode where speed is priority.
+ * Requires: time sync + almanac + approximate position.
  *
  * @returns true if command was sent successfully
  */
-bool vessel_assistance_send_warm_start(void);
+bool gateway_assistance_send_warm_start(void);
+
+/*!
+ * @brief Send hot start command to AG3335 (PAIR004)
+ *
+ * Hot start uses ephemeris if available for fastest TTFF.
+ * Best for PIW phases where device had recent fix.
+ * Falls back to warm start behavior if ephemeris not available.
+ *
+ * @returns true if command was sent successfully
+ */
+bool gateway_assistance_send_hot_start(void);
 
 /*!
  * @brief Send hardcoded test position to AG3335 (TEMPORARY for testing)
@@ -212,12 +253,12 @@ bool vessel_assistance_send_warm_start(void);
  *
  * @returns true if command was sent successfully
  */
-bool vessel_assistance_send_test_position(void);
+bool gateway_assistance_send_test_position(void);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif // VESSEL_ASSISTANCE_H
+#endif // GATEWAY_ASSISTANCE_H
 
 /* --- EOF ------------------------------------------------------------------ */

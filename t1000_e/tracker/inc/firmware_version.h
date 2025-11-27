@@ -19,17 +19,41 @@ extern "C" {
 #define FIRMWARE_VERSION_MAJOR      1
 #define FIRMWARE_VERSION_MINOR      0
 #define FIRMWARE_VERSION_PATCH      0
-#define FIRMWARE_VERSION_BUILD      4
+#define FIRMWARE_VERSION_BUILD      6
 
-// Version string (e.g., "1.0.0-b4")
-#define FIRMWARE_VERSION_STRING     "1.0.0-b4"
+// Version string (e.g., "1.0.0-b6")
+#define FIRMWARE_VERSION_STRING     "1.0.0-b6"
 
 // Version features (changelog for this version)
-#define FIRMWARE_VERSION_FEATURES   "GNSS timing fixes, Swimming nav mode"
+#define FIRMWARE_VERSION_FEATURES   "marine_gnss, gateway_assistance rename"
 
 /*
  * Version History:
  * 
+ * v1.0.0-b6 (2025-11-26)
+ *   - RENAMED: mob_piw_tracker -> marine_gnss (clearer module purpose)
+ *   - RENAMED: vessel_assistance -> gateway_assistance (supports any gateway)
+ *   - ADDED: PAIR004 hot start for PIW phases (uses ephemeris if available)
+ *   - ADDED: PAIR005 warm start for MOB burst (uses almanac, no ephemeris)
+ *   - ADDED: GNSS power cycling for PAIR590/600 when not in GNSS mode
+ *   - ADDED: Dynamic NMEA debug output for MOB burst and PIW Phase 1
+ *   - ADDED: gnss_enable_nmea_debug() for quality verification
+ *   - FIXED: gateway_assistance_send_time_to_gnss() now takes gnss_is_active param
+ *   - Gateway assistance only powers GNSS when needed (BLE/WiFi mode)
+ *
+ * v1.0.0-b5 (2025-11-26)
+ *   - ADDED: MOB (Man Overboard) burst mode - continuous GNSS for 5 min
+ *   - ADDED: PIW (Person In Water) tracking mode - quality-driven GNSS scans
+ *   - ADDED: gnss_fix_t struct with HDOP/HACC quality metrics
+ *   - ADDED: gnss_scan_until_good() - early exit when fix quality acceptable
+ *   - ADDED: Double uplinks every 30s with position + HDOP
+ *   - ADDED: BLE scan interrupt - GNSS stops if beacon found
+ *   - ADDED: Phase transitions: 30s->1min->2min scan intervals
+ *   - MOB burst: 0-5 min, 30s double uplinks, loose accuracy
+ *   - PIW phase 1: 5-30 min, 30s intervals, HDOP<3, HACC<15m
+ *   - PIW phase 2: 30min-2hr, 60s intervals
+ *   - PIW phase 3: after 2hr, 120s intervals
+ *
  * v1.0.0-b4 (2025-11-26)
  *   - FIXED: Adaptive GNSS scan duration now uses MIN (user config as upper bound)
  *   - FIXED: PAIR590 UTC time injection moved to GNSS scan start (was sent when asleep)

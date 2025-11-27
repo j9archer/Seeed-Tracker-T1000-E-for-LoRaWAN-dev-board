@@ -28,7 +28,7 @@
 #include "app_beep.h"
 #include "app_timer.h"
 #include "wifi_scan.h"
-#include "vessel_assistance.h"
+#include "gateway_assistance.h"
 #include "firmware_version.h"
 
 /*
@@ -256,7 +256,7 @@ int main( void )
     app_beep_init( );
     
     /* Initialize vessel assistance system */
-    vessel_assistance_init( );
+    gateway_assistance_init( );
     
     /* Print firmware version */
     HAL_DBG_TRACE_INFO( "========================================\n" );
@@ -279,7 +279,7 @@ int main( void )
         /* TEMPORARY: Send hardcoded test position to AG3335 NVRAM */
         /* TODO: Remove this when server position downlink is implemented */
         /* Must be sent BEFORE gnss_scan_stop() while module is powered */
-        vessel_assistance_send_test_position( );
+        gateway_assistance_send_test_position( );
         hal_mcu_wait_ms( 500 );  // Allow time for ACK responses
         
         gnss_scan_stop( );
@@ -611,11 +611,11 @@ static void on_modem_alarm( void )
     ASSERT_SMTC_MODEM_RC( smtc_modem_get_status( stack_id, &modem_status ));
     modem_status_to_string( modem_status );
     
-    /* Periodic time sync every 4 hours (14400 seconds) */
+    /* Periodic time sync every 2 hours (7200 seconds) */
     uint32_t current_time_s = hal_rtc_get_time_s();
-    if( last_time_sync_s > 0 && (current_time_s - last_time_sync_s) >= 14400 )
+    if( last_time_sync_s > 0 && (current_time_s - last_time_sync_s) >= 7200 )
     {
-        HAL_DBG_TRACE_INFO( "Triggering periodic DeviceTimeReq (4 hour interval)\n" );
+        HAL_DBG_TRACE_INFO( "Triggering periodic DeviceTimeReq (2 hour interval)\n" );
         ASSERT_SMTC_MODEM_RC( smtc_modem_time_trigger_sync_request( stack_id ) );
         last_time_sync_s = current_time_s;  // Update even if request fails, retry in 4h
     }
@@ -716,10 +716,10 @@ static void on_modem_down_data( int8_t rssi, int8_t snr, smtc_modem_event_downda
         {
             app_lora_packet_downlink_decode( (uint8_t*) payload, size );
         }
-        else if( port == VESSEL_ASSISTANCE_PORT )
+        else if( port == GATEWAY_ASSISTANCE_PORT )
         {
             // Handle vessel position and time update
-            vessel_assistance_handle_downlink( payload, size );
+            gateway_assistance_handle_downlink( payload, size );
         }
     }
 }
@@ -765,19 +765,19 @@ static void app_tracker_wifi_scan_end( void )
 static uint32_t app_get_adaptive_gnss_scan_duration( void )
 {
     // Check charging status
-    bool is_charging = vessel_assistance_is_charging( );
+    bool is_charging = gateway_assistance_is_charging( );
     HAL_DBG_TRACE_INFO( "GNSS scan duration calc - charging: %s\n", is_charging ? "YES" : "NO" );
     
     // Check if device is charging and almanac maintenance is needed
     // This allows almanac refresh without draining battery
-    if( is_charging && vessel_assistance_needs_almanac_maintenance( 14 ))
+    if( is_charging && gateway_assistance_needs_almanac_maintenance( 14 ))
     {
         HAL_DBG_TRACE_INFO( "Charging detected - scheduling almanac maintenance\n" );
-        return vessel_assistance_get_almanac_scan_duration( );  // 12.5 minutes
+        return gateway_assistance_get_almanac_scan_duration( );  // 12.5 minutes
     }
     
     // Use vessel assistance to determine optimal scan duration
-    uint32_t recommended_duration = vessel_assistance_get_recommended_scan_duration( );
+    uint32_t recommended_duration = gateway_assistance_get_recommended_scan_duration( );
     
     // Use the shorter duration to optimize battery life
     // Adaptive duration reduces scan time when GNSS is ready
@@ -800,15 +800,15 @@ static void app_tracker_gnss_scan_begin( void )
     
     // Send current time to AG3335 NVRAM (PAIR590)
     // MUST be sent while module is powered and UART active
-    vessel_assistance_send_time_to_gnss( );
+    gateway_assistance_send_time_to_gnss( true );  // true = GNSS is active
     
     // Check if GNSS is ready for warm start (time sync + fresh almanac + recent position)
-    if( vessel_assistance_is_gnss_ready( ))
+    if( gateway_assistance_is_gnss_ready( ))
     {
         // Send PAIR005 warm start command for faster TTFF
         // Position and time already in AG3335 NVRAM from PAIR590/PAIR600
         // MUST be sent AFTER gnss_scan_start() while module is powered and UART active
-        vessel_assistance_send_warm_start( );
+        gateway_assistance_send_warm_start( );
         HAL_DBG_TRACE_INFO( "GNSS warm start enabled - expect faster TTFF\n" );
         hal_mcu_wait_ms( 500 );  // Allow time for ACK responses
     }
@@ -827,7 +827,7 @@ static void app_tracker_gnss_scan_end( void )
     gnss_scan_stop( );
     
     // Check if this was an almanac maintenance scan
-    if( vessel_assistance_is_charging( ) && vessel_assistance_needs_almanac_maintenance( 14 ))
+    if( gateway_assistance_is_charging( ) && gateway_assistance_needs_almanac_maintenance( 14 ))
     {
         is_almanac_maintenance = true;
         HAL_DBG_TRACE_INFO( "Almanac maintenance scan completed - position not sent to prevent MOB alert\n" );
@@ -839,7 +839,7 @@ static void app_tracker_gnss_scan_end( void )
         HAL_DBG_TRACE_PRINTF( "lat: %u, lon: %u\n\n", lat, lon );
         
         // Always store position for vessel assistance (almanac or normal)
-        vessel_assistance_store_own_fix( lat, lon );
+        gateway_assistance_store_own_fix( lat, lon );
         
         // Only prepare uplink data if NOT almanac maintenance
         if( !is_almanac_maintenance )
@@ -1091,7 +1091,7 @@ static void app_tracker_scan_process( void )
         if( tracker_scan_status == 0 )
         {
             // Check if almanac maintenance needed while charging - prioritize over WiFi
-            if( vessel_assistance_is_charging( ) && vessel_assistance_needs_almanac_maintenance( 14 ))
+            if( gateway_assistance_is_charging( ) && gateway_assistance_needs_almanac_maintenance( 14 ))
             {
                 uint32_t adaptive_duration = app_get_adaptive_gnss_scan_duration( );
                 smtc_modem_alarm_start_timer( adaptive_duration );

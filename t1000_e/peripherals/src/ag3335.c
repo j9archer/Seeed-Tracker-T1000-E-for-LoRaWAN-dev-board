@@ -1,5 +1,7 @@
+#include "ag3335.h"
 #include "smtc_hal.h"
 #include "smtc_hal_dbg_trace.h"
+#include <math.h>
 // Silence redefinition warning and keep local buffer size choice
 #ifdef MINMEA_MAX_SENTENCE_LENGTH
 #undef MINMEA_MAX_SENTENCE_LENGTH
@@ -34,6 +36,12 @@ static struct minmea_sentence_vtg frame_vtg;
 static struct minmea_sentence_zda frame_zda;
 
 static int32_t latitude_i32 = 0, longitude_i32 = 0, speed_i32 = 0;
+
+// BLE interrupt flag for quality-driven scanning
+static volatile bool ble_beacon_found = false;
+
+// NMEA debug flag for MOB/PIW quality verification
+static bool nmea_debug_enabled = false;
 
 // Forward declarations for functions used before their definitions
 static void gnss_scan_clean( void );
@@ -95,6 +103,16 @@ void gnss_nmea_parse_line( char *line )
 #if GPS_INFO_PRINTF
                 PRINTF( "$xxGGA: fix quality: %d\r\n", frame_gga.fix_quality );
 #endif
+                // Dynamic NMEA debug for MOB/PIW modes
+                if( nmea_debug_enabled && frame_gga.fix_quality > 0 )
+                {
+                    PRINTF( "[NMEA] GGA: fix=%d, sats=%d, HDOP=%.1f, lat=%.6f, lon=%.6f\r\n",
+                            frame_gga.fix_quality,
+                            frame_gga.satellites_tracked,
+                            minmea_tofloat( &frame_gga.hdop ),
+                            minmea_tocoord( &frame_gga.latitude ),
+                            minmea_tocoord( &frame_gga.longitude ));
+                }
             }
             else
             {
@@ -124,6 +142,15 @@ void gnss_nmea_parse_line( char *line )
                         minmea_tofloat( &frame_gst.longitude_error_deviation ),
                         minmea_tofloat( &frame_gst.altitude_error_deviation ));
 #endif
+                // Dynamic NMEA debug for MOB/PIW modes - show horizontal accuracy
+                if( nmea_debug_enabled )
+                {
+                    float lat_err = minmea_tofloat( &frame_gst.latitude_error_deviation );
+                    float lon_err = minmea_tofloat( &frame_gst.longitude_error_deviation );
+                    float hacc = sqrtf( lat_err * lat_err + lon_err * lon_err );
+                    PRINTF( "[NMEA] GST: HACC=%.1fm (lat_err=%.1f, lon_err=%.1f)\r\n",
+                            hacc, lat_err, lon_err );
+                }
             }
             else
             {
@@ -257,7 +284,7 @@ void gnss_nmea_parse( char *str )
                         }
                         else
                         {
-                            GNSS_TRACE_INFO( "AG3335 ACK: PAIR%03d command FAILED (status=%d)\n", cmd_num, status );
+                            GNSS_TRACE_INFO( "AG3335 ACK: PAIR%03d command FAILED (status=%d): %s\n", cmd_num, status, gps_nmea_line );
                         }
                     }
                 }
@@ -438,4 +465,170 @@ void gnss_get_position( int32_t *lat, int32_t *lon )
 void gnss_parse_handler( char *nmea )
 {
     gnss_nmea_parse( nmea );
+}
+
+/*
+ * -----------------------------------------------------------------------------
+ * --- QUALITY-DRIVEN GNSS SCANNING FOR MOB/PIW --------------------------------
+ * -----------------------------------------------------------------------------
+ */
+
+bool gnss_get_quality_fix( gnss_fix_t *fix )
+{
+    if( fix == NULL )
+    {
+        return false;
+    }
+    
+    // Initialize to invalid state
+    memset( fix, 0, sizeof( gnss_fix_t ));
+    fix->valid = false;
+    fix->hdop = 99.9f;  // Invalid HDOP
+    fix->hacc = 999.0f; // Invalid accuracy
+    
+    // Check basic fix validity from RMC
+    if( !frame_rmc.latitude.scale || !frame_rmc.longitude.scale )
+    {
+        return false;
+    }
+    
+    float latitude = minmea_tocoord( &frame_rmc.latitude );
+    float longitude = minmea_tocoord( &frame_rmc.longitude );
+    
+    if( latitude > 180 || longitude > 360 )
+    {
+        return false;
+    }
+    
+    // Populate fix structure
+    fix->latitude = (int32_t)( latitude * 1000000 );
+    fix->longitude = (int32_t)( longitude * 1000000 );
+    fix->speed = (int32_t)( minmea_tofloat( &frame_rmc.speed ) * 1000000 );
+    
+    // Get HDOP from GGA sentence
+    if( frame_gga.hdop.scale > 0 )
+    {
+        fix->hdop = minmea_tofloat( &frame_gga.hdop );
+    }
+    
+    // Get fix quality and satellites from GGA
+    fix->fix_quality = frame_gga.fix_quality;
+    fix->satellites = frame_gga.satellites_tracked;
+    
+    // Calculate horizontal accuracy from GST if available
+    // HACC ≈ sqrt(lat_err² + lon_err²) in meters
+    if( frame_gst.latitude_error_deviation.scale > 0 && 
+        frame_gst.longitude_error_deviation.scale > 0 )
+    {
+        float lat_err = minmea_tofloat( &frame_gst.latitude_error_deviation );
+        float lon_err = minmea_tofloat( &frame_gst.longitude_error_deviation );
+        fix->hacc = sqrtf( lat_err * lat_err + lon_err * lon_err );
+    }
+    else if( fix->hdop < 99.0f )
+    {
+        // Estimate HACC from HDOP if GST not available
+        // Typical GPS error ≈ HDOP * 5 meters (conservative)
+        fix->hacc = fix->hdop * 5.0f;
+    }
+    
+    // Valid if we have a real GPS fix (quality >= 1)
+    fix->valid = ( fix->fix_quality >= 1 ); 
+    
+    // Update legacy static variables for backward compatibility
+    if( fix->valid )
+    {
+        latitude_i32 = fix->latitude;
+        longitude_i32 = fix->longitude;
+        speed_i32 = fix->speed;
+    }
+    
+    return fix->valid;
+}
+
+bool gnss_scan_until_good( uint32_t max_ms, float max_hdop, float max_hacc, gnss_fix_t *fix )
+{
+    if( fix == NULL )
+    {
+        return false;
+    }
+    
+    // Initialize fix structure
+    memset( fix, 0, sizeof( gnss_fix_t ));
+    fix->valid = false;
+    
+    // Clear BLE interrupt flag
+    ble_beacon_found = false;
+    
+    // Start GNSS scan
+    gnss_scan_start( );
+    
+    uint32_t start_time = hal_rtc_get_time_ms( );
+    uint32_t elapsed = 0;
+    bool got_good_fix = false;
+    
+    GNSS_TRACE_INFO( "GNSS quality scan: max %lu ms, HDOP<%.1f, HACC<%.1f m\n", 
+                     max_ms, max_hdop, max_hacc );
+    
+    // Poll at ~1 Hz until good fix or timeout
+    while( elapsed < max_ms )
+    {
+        // Wait 1 second between checks
+        hal_mcu_wait_ms( 1000 );
+        elapsed = hal_rtc_get_time_ms( ) - start_time;
+        
+        // Check for BLE interrupt
+        if( ble_beacon_found )
+        {
+            GNSS_TRACE_INFO( "GNSS scan interrupted by BLE beacon at %lu ms\n", elapsed );
+            break;
+        }
+        
+        // Try to get a quality fix
+        if( gnss_get_quality_fix( fix ))
+        {
+            GNSS_TRACE_INFO( "GNSS fix @ %lu ms: HDOP=%.1f, HACC=%.1f m, sats=%d\n",
+                            elapsed, fix->hdop, fix->hacc, fix->satellites );
+            
+            // Check if fix meets quality thresholds
+            if( fix->hdop <= max_hdop && fix->hacc <= max_hacc )
+            {
+                got_good_fix = true;
+                GNSS_TRACE_INFO( "GNSS GOOD FIX at %lu ms - quality OK!\n", elapsed );
+                break;
+            }
+        }
+    }
+    
+    // Stop GNSS module
+    gnss_scan_stop( );
+    
+    // Get final fix status if we didn't get a good one during polling
+    if( !got_good_fix && !ble_beacon_found )
+    {
+        gnss_get_quality_fix( fix );
+        GNSS_TRACE_INFO( "GNSS timeout after %lu ms: valid=%d, HDOP=%.1f, HACC=%.1f\n",
+                        elapsed, fix->valid, fix->hdop, fix->hacc );
+    }
+    
+    return got_good_fix;
+}
+
+bool gnss_check_ble_interrupt( void )
+{
+    return ble_beacon_found;
+}
+
+void gnss_set_ble_found( bool found )
+{
+    ble_beacon_found = found;
+    if( found )
+    {
+        GNSS_TRACE_INFO( "BLE beacon found - GNSS interrupt flag set\n" );
+    }
+}
+
+void gnss_enable_nmea_debug( bool enable )
+{
+    nmea_debug_enabled = enable;
+    GNSS_TRACE_INFO( "NMEA debug output %s\n", enable ? "ENABLED" : "DISABLED" );
 }
