@@ -123,6 +123,63 @@ void gnss_set_ble_found( bool found );
  */
 void gnss_enable_nmea_debug( bool enable );
 
+/*!
+ * @brief Check if almanac is valid for reliable GNSS operation
+ * 
+ * Based on PAIR550 status query. Returns true if at least 4 GPS
+ * satellites have valid almanac data for the 14-day horizon.
+ * 
+ * @returns true if almanac is valid for warm/hot start
+ */
+bool gnss_almanac_is_valid( void );
+
+/*!
+ * @brief Check if almanac maintenance is needed
+ * 
+ * Returns true if almanac data is stale or insufficient for
+ * reliable GNSS operation. Consider running a 750-second scan
+ * to download fresh almanac.
+ * 
+ * @returns true if maintenance scan is recommended
+ */
+bool gnss_almanac_needs_maintenance( void );
+
+/*!
+ * @brief Get count of satellites with valid almanac
+ * 
+ * Returns total count across GPS, GLONASS, and BeiDou constellations
+ * based on last PAIR550 query.
+ * 
+ * @returns Number of satellites with valid almanac (0 if unknown)
+ */
+uint8_t gnss_almanac_get_valid_sv_count( void );
+
+/*!
+ * @brief Get RTC timestamp of last almanac status check
+ * 
+ * @returns RTC time in seconds when PAIR550 was last queried
+ */
+uint32_t gnss_almanac_get_last_check_time( void );
+
+/*!
+ * @brief Refresh almanac status by querying GNSS module
+ * 
+ * Call this when GNSS is powered and UART is initialized
+ * to get updated almanac status.
+ */
+void gnss_almanac_refresh_status( void );
+
+/*!
+ * @brief Send a PAIR command to the AG3335 GNSS module
+ * 
+ * Automatically calculates checksum and formats the command.
+ * Sends once and waits for response.
+ * 
+ * @param [in] command Command string without checksum (e.g., "$PAIR081")
+ * @returns true (always, actual ACK is parsed asynchronously)
+ */
+bool gnss_send_command( const char* command );
+
 #ifdef __cplusplus
 }
 #endif

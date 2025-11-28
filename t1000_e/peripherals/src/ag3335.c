@@ -43,11 +43,21 @@ static volatile bool ble_beacon_found = false;
 // NMEA debug flag for MOB/PIW quality verification
 static bool nmea_debug_enabled = false;
 
+// Almanac status from PAIR550 response
+// Each bit represents a satellite PRN (1-32 for GPS)
+static uint32_t almanac_gps_valid = 0;      // GPS satellites with valid almanac
+static uint32_t almanac_glonass_valid = 0;  // GLONASS satellites with valid almanac
+static uint32_t almanac_beidou_valid = 0;   // BeiDou satellites with valid almanac  
+static uint32_t almanac_last_check_rtc = 0; // RTC timestamp of last almanac check
+static bool almanac_status_valid = false;   // True if we have valid almanac status
+
 // Forward declarations for functions used before their definitions
 static void gnss_scan_clean( void );
 static void gnss_scan_lock_sleep( void );
 static void gnss_scan_unlock_sleep( void );
 static void gnss_scan_enter_rtc_mode( void );
+static void gnss_set_navigation_mode( uint8_t mode );
+void gnss_parse_pair550_response( const char* response );
 
 static uint8_t app_nmea_check_sum( char *buf )
 {
@@ -61,6 +71,30 @@ static uint8_t app_nmea_check_sum( char *buf )
 	}
 
 	return chk;
+}
+
+// Command retry configuration
+#define GNSS_CMD_RETRIES        3
+#define GNSS_CMD_RETRY_DELAY_MS 200
+
+bool gnss_send_command( const char* command )
+{
+    char full_command[128];
+    uint8_t checksum = app_nmea_check_sum( (char*)command );
+    
+    // Format: $PAIR_CMD,params*CS\r\n
+    snprintf( full_command, sizeof(full_command), "%s*%02X\r\n", command, checksum );
+    
+    GNSS_TRACE_INFO( "GNSS CMD: %s (x%d)\n", command, GNSS_CMD_RETRIES );
+    
+    // Send command multiple times for reliability
+    for( uint8_t i = 0; i < GNSS_CMD_RETRIES; i++ )
+    {
+        hal_uart_0_tx( (uint8_t*)full_command, strlen( full_command ) );
+        hal_mcu_wait_ms( GNSS_CMD_RETRY_DELAY_MS );
+    }
+    
+    return true;
 }
 
 void gnss_nmea_parse_line( char *line )
@@ -288,6 +322,25 @@ void gnss_nmea_parse( char *str )
                         }
                     }
                 }
+                else if( strncmp( gps_nmea_line, "$PAIR550", 8 ) == 0 )
+                {
+                    // Parse almanac status response
+                    gnss_parse_pair550_response( gps_nmea_line );
+                }
+                else if( strncmp( gps_nmea_line, "$PAIR081", 8 ) == 0 )
+                {
+                    // Parse navigation mode query response
+                    // Format: $PAIR081,<mode>*CS
+                    int nav_mode = -1;
+                    if( sscanf( gps_nmea_line, "$PAIR081,%d", &nav_mode ) == 1 )
+                    {
+                        GNSS_TRACE_INFO( "GNSS: Current navigation mode = %d\n", nav_mode );
+                    }
+                    else
+                    {
+                        GNSS_TRACE_INFO( "GNSS: PAIR081 response: %s\n", gps_nmea_line );
+                    }
+                }
                 else
                 {
                     // Log other PAIR responses for debugging
@@ -304,8 +357,112 @@ void gnss_nmea_parse( char *str )
     }
 }
 
+static void gnss_enable_nvram_auto_save( void )
+{
+    // PAIR510,1 - Enable NVRAM auto save for ephemeris/almanac persistence
+    gnss_send_command( "$PAIR510,1" );
+}
+
+// Flag to indicate waiting for PAIR550 response
+static volatile bool pair550_pending = false;
+static volatile bool pair550_received = false;
+
+void gnss_parse_pair550_response( const char* response )
+{
+    // PAIR550 response format: $PAIR550,<GPS_bitmask>,<GLONASS_bitmask>,<BeiDou_bitmask>*CS
+    // Each bitmask is hex representing satellites with valid almanac at the queried horizon
+    // Example: $PAIR550,FFFFFFFF,00FFFFFF,0000FFFF*CS means all GPS, 24 GLONASS, 16 BeiDou
+    
+    uint32_t gps = 0, glonass = 0, beidou = 0;
+    
+    if( sscanf( response, "$PAIR550,%lX,%lX,%lX", &gps, &glonass, &beidou ) >= 1 )
+    {
+        almanac_gps_valid = gps;
+        almanac_glonass_valid = glonass;
+        almanac_beidou_valid = beidou;
+        almanac_last_check_rtc = hal_rtc_get_time_s();
+        almanac_status_valid = true;
+        pair550_received = true;
+        
+        // Count satellites with valid almanac
+        uint8_t gps_count = __builtin_popcount( gps );
+        uint8_t glonass_count = __builtin_popcount( glonass );
+        uint8_t beidou_count = __builtin_popcount( beidou );
+        
+        GNSS_TRACE_INFO( "GNSS Almanac Status (14-day horizon):\n" );
+        GNSS_TRACE_INFO( "  GPS:     0x%08lX (%u satellites)\n", gps, gps_count );
+        GNSS_TRACE_INFO( "  GLONASS: 0x%08lX (%u satellites)\n", glonass, glonass_count );
+        GNSS_TRACE_INFO( "  BeiDou:  0x%08lX (%u satellites)\n", beidou, beidou_count );
+        
+        if( gps_count >= 4 )
+        {
+            GNSS_TRACE_INFO( "  Almanac: GOOD (>= 4 GPS SVs valid for 14 days)\n" );
+        }
+        else if( gps_count > 0 || glonass_count > 0 || beidou_count > 0 )
+        {
+            GNSS_TRACE_INFO( "  Almanac: PARTIAL (some SVs valid, maintenance recommended)\n" );
+        }
+        else
+        {
+            GNSS_TRACE_INFO( "  Almanac: STALE (no valid almanac, cold start required)\n" );
+        }
+    }
+    else
+    {
+        GNSS_TRACE_INFO( "GNSS: Failed to parse PAIR550 response: %s\n", response );
+        almanac_status_valid = false;
+        pair550_received = true;  // Mark as received even if parse failed
+    }
+}
+
+static void gnss_check_almanac_status( void )
+{
+    // Reset response flag and mark as pending
+    pair550_received = false;
+    pair550_pending = true;
+    
+    // PAIR550,0,1 - Query almanac validity 1 day in future (Type 0 = GPS)
+    // Using 1-day horizon since we check daily while charging anyway
+    // Note: This command may fail with status=1 if module is busy or almanac not yet initialized
+    // The actual response comes as $PAIR550,<gps>,<glonass>,<beidou>*CS
+    GNSS_TRACE_INFO( "GNSS: Querying almanac status (PAIR550,0,1)...\n" );
+    gnss_send_command( "$PAIR550,0,1" );
+    
+    // Wait for response (gnss_send_command already waits 3x200ms = 600ms)
+    // Additional wait if needed
+    if( !pair550_received )
+    {
+        uint32_t start_time = hal_rtc_get_time_ms();
+        while( !pair550_received && ( hal_rtc_get_time_ms() - start_time ) < 500 )
+        {
+            hal_mcu_wait_ms( 50 );
+        }
+    }
+    
+    pair550_pending = false;
+    
+    if( !pair550_received )
+    {
+        // PAIR550 may return ACK status=1 if almanac data not yet available
+        // This is normal on cold start - almanac downloads during tracking
+        GNSS_TRACE_INFO( "GNSS: PAIR550 no data response (almanac may not be initialized yet)\n" );
+        almanac_status_valid = false;
+        
+        // Set default values indicating unknown/cold state
+        almanac_gps_valid = 0;
+        almanac_glonass_valid = 0;
+        almanac_beidou_valid = 0;
+    }
+}
+
 void gnss_init( void )
 {
+    // Delay to allow serial connection before GNSS init logs
+    GNSS_TRACE_INFO( "Waiting 5s for serial connection...\n" );
+    hal_mcu_wait_ms( 5000 );
+    
+    // GPIO initialization only - no UART commands here
+    // Commands are sent in gnss_scan_start() after PAIR382 succeeds
     hal_gpio_init_out( AG3335_POWER_EN, HAL_GPIO_SET ); // GPS_POWER_EN_PIN
     GNSS_TRACE_INFO( "GNSS: POWER_EN -> ON\n" );
     hal_mcu_wait_ms( 10 );
@@ -322,28 +479,24 @@ void gnss_init( void )
     GNSS_TRACE_INFO( "GNSS: SLEEP_INT -> HIGH (awake)\n" );
     hal_gpio_init_out( AG3335_RTC_INT, HAL_GPIO_RESET ); // GPS_RTC_INT_PIN, set GPS quit rtc mode, high pulse(1ms)active
     hal_gpio_init_in( AG3335_RESETB_OUT, HAL_GPIO_PULL_MODE_UP, HAL_GPIO_IRQ_MODE_OFF, NULL ); // GPS_RESETB_OUT_PIN, gps reset ok, to mcu
+    
+    GNSS_TRACE_INFO( "GNSS: GPIO init complete\n" );
+}
+
+static void gnss_query_navigation_mode( void )
+{
+    // PAIR081 - Query current navigation mode
+    gnss_send_command( "$PAIR081" );
 }
 
 static void gnss_set_navigation_mode( uint8_t mode )
 {
-    char payload[24]  = { 0 };
-    char command[40]  = { 0 };
-
-    // Build PAIR080 payload without checksum
-    // $PAIR080,<CmdType>
-    sprintf( payload, "$PAIR080,%u", mode );
-
-    uint8_t check_sum = app_nmea_check_sum( payload );
-    sprintf( command, "%s*%02X\r\n", payload, check_sum );
-
-    // Send a few times to improve robustness, similar to other PAIR helpers
-    for( uint8_t i = 0; i < 4; i++ )
-    {
-        hal_uart_0_tx( ( uint8_t * ) command, strlen( command ) );
-        hal_mcu_wait_ms( 40 );
-    }
-
-    GNSS_TRACE_INFO( "GNSS: navigation mode set to %u (PAIR080)\n", mode );
+    char command[24];
+    
+    // PAIR080,<mode> - Set navigation mode
+    // 0 = Normal, 1 = Fitness, 4 = Stationary, 7 = Swimming
+    snprintf( command, sizeof(command), "$PAIR080,%u", mode );
+    gnss_send_command( command );
 }
 
 bool gnss_scan_start( void )
@@ -366,9 +519,26 @@ bool gnss_scan_start( void )
 
     gnss_scan_lock_sleep( );
     GNSS_TRACE_INFO( "GNSS: lock sleep (active tracking)\n" );
-
-    // Set navigation to Swimming mode (CmdType = 7) for MOB/PIW use-case
-    gnss_set_navigation_mode( 7 );
+    
+    // Now module is locked and responsive - send configuration commands
+    // Use single sends with proper waits (not aggressive retries)
+    hal_mcu_wait_ms( 100 );
+    
+    // Query current navigation mode first
+    gnss_query_navigation_mode( );
+    
+    // Try to set navigation mode to Fitness (mode=1) for MOB/PIW
+    // Note: Swimming mode (7) returns status=4 (not supported)
+    gnss_set_navigation_mode( 1 );
+    
+    // Query again to see if it changed
+    gnss_query_navigation_mode( );
+    
+    // Enable NVRAM auto-save for ephemeris/almanac persistence
+    gnss_enable_nvram_auto_save( );
+    
+    // Query almanac status (14-day horizon check)
+    gnss_check_almanac_status( );
 
     return true;
 }
@@ -387,34 +557,38 @@ void gnss_scan_stop( void )
 
 static void gnss_scan_lock_sleep( void )
 {
-    char command[32] = { 0 };
-    uint8_t check_sum = app_nmea_check_sum( "$PAIR382,1" );
-    sprintf( command, "$PAIR382,1*%02X\r\n", check_sum );
+    // PAIR382,1 - Lock sleep mode (prevent module from sleeping during scan)
+    // Aggressive retries (25x) to wake module from dormant state
+    char full_command[32];
+    uint8_t checksum = app_nmea_check_sum( "$PAIR382,1" );
+    snprintf( full_command, sizeof(full_command), "$PAIR382,1*%02X\r\n", checksum );
+    
+    GNSS_TRACE_INFO( "GNSS CMD: $PAIR382,1 (x25 aggressive wake)\n" );
     for( uint8_t i = 0; i < 25; i++ )
     {
-        hal_uart_0_tx(( uint8_t *)command, strlen( command ));
+        hal_uart_0_tx( (uint8_t*)full_command, strlen( full_command ) );
         hal_mcu_wait_ms( 40 );
     }
 }
 
 static void gnss_scan_unlock_sleep( void )
 {
-    char command[32] = { 0 };
-    uint8_t check_sum = app_nmea_check_sum( "$PAIR382,0" );
-    sprintf( command, "$PAIR382,0*%02X\r\n", check_sum );
-    for( uint8_t i = 0; i < 4; i++ )
-    {
-        hal_uart_0_tx(( uint8_t *)command, strlen( command ));
-        hal_mcu_wait_ms( 40 );
-    }
+    // PAIR382,0 - Unlock sleep mode (allow module to sleep)
+    gnss_send_command( "$PAIR382,0" );
 }
 
 static void gnss_scan_enter_rtc_mode( void )
 {
-    char *command = "$PAIR650,0*25\r\n";
+    // PAIR650,0 - Enter RTC low-power mode
+    // Aggressive retries (25x) to ensure module receives command
+    char full_command[32];
+    uint8_t checksum = app_nmea_check_sum( "$PAIR650,0" );
+    snprintf( full_command, sizeof(full_command), "$PAIR650,0*%02X\r\n", checksum );
+    
+    GNSS_TRACE_INFO( "GNSS CMD: $PAIR650,0 (x25 enter RTC mode)\n" );
     for( uint8_t i = 0; i < 25; i++ )
     {
-        hal_uart_0_tx(( uint8_t *)command, strlen( command ));
+        hal_uart_0_tx( (uint8_t*)full_command, strlen( full_command ) );
         hal_mcu_wait_ms( 40 );
     }
 }
@@ -631,4 +805,66 @@ void gnss_enable_nmea_debug( bool enable )
 {
     nmea_debug_enabled = enable;
     GNSS_TRACE_INFO( "NMEA debug output %s\n", enable ? "ENABLED" : "DISABLED" );
+}
+
+/*
+ * -----------------------------------------------------------------------------
+ * --- ALMANAC STATUS FUNCTIONS -----------------------------------------------
+ * -----------------------------------------------------------------------------
+ */
+
+bool gnss_almanac_is_valid( void )
+{
+    if( !almanac_status_valid )
+    {
+        return false;
+    }
+    
+    // Consider almanac valid if at least 4 GPS satellites have valid almanac
+    // (minimum for a 3D fix with one redundant)
+    uint8_t gps_count = __builtin_popcount( almanac_gps_valid );
+    return ( gps_count >= 4 );
+}
+
+bool gnss_almanac_needs_maintenance( void )
+{
+    if( !almanac_status_valid )
+    {
+        // If we've never checked, assume maintenance is needed
+        return true;
+    }
+    
+    uint8_t gps_count = __builtin_popcount( almanac_gps_valid );
+    uint8_t total_count = gps_count + 
+                          __builtin_popcount( almanac_glonass_valid ) +
+                          __builtin_popcount( almanac_beidou_valid );
+    
+    // Need maintenance if:
+    // - Less than 4 GPS satellites with valid almanac, OR
+    // - Total constellation coverage is very low
+    return ( gps_count < 4 || total_count < 8 );
+}
+
+uint8_t gnss_almanac_get_valid_sv_count( void )
+{
+    if( !almanac_status_valid )
+    {
+        return 0;
+    }
+    
+    return __builtin_popcount( almanac_gps_valid ) +
+           __builtin_popcount( almanac_glonass_valid ) +
+           __builtin_popcount( almanac_beidou_valid );
+}
+
+uint32_t gnss_almanac_get_last_check_time( void )
+{
+    return almanac_last_check_rtc;
+}
+
+void gnss_almanac_refresh_status( void )
+{
+    // This can be called when GNSS is already powered and UART is initialized
+    // to refresh the almanac status
+    gnss_check_almanac_status();
 }

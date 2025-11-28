@@ -127,8 +127,15 @@ bool mob_tracker_activate( void )
     // Enable NMEA debug output for burst mode
     gnss_enable_nmea_debug(true);
     
-    // Start continuous GNSS for burst mode
-    gnss_scan_start( );
+    // Start continuous GNSS for burst mode (if not already running in background)
+    if( !gateway_assistance_is_background_gnss_active() )
+    {
+        gnss_scan_start( );
+    }
+    else
+    {
+        MOB_TRACE_INFO( "GNSS already running in background mode\n" );
+    }
     gnss_continuous_active = true;
     
     // Inject time to GNSS (module is now powered)
@@ -154,12 +161,12 @@ void mob_tracker_cancel( void )
     // Disable NMEA debug
     gnss_enable_nmea_debug(false);
     
-    // Stop GNSS if running
-    if( gnss_continuous_active )
+    // Stop GNSS if running (but not if background mode is active)
+    if( gnss_continuous_active && !gateway_assistance_is_background_gnss_active() )
     {
         gnss_scan_stop( );
-        gnss_continuous_active = false;
     }
+    gnss_continuous_active = false;
     
     // Send cancellation uplink
     mob_send_cancellation_uplink( );
@@ -425,9 +432,16 @@ static uint32_t mob_process_piw( void )
     gnss_fix_t fix;
     bool got_good_fix;
     
-    // Start GNSS for this scan
-    gnss_scan_start();
-    hal_mcu_wait_ms(100);  // Allow module to power up
+    // Start GNSS for this scan (if not already running in background)
+    if( !gateway_assistance_is_background_gnss_active() )
+    {
+        gnss_scan_start();
+        hal_mcu_wait_ms(100);  // Allow module to power up
+    }
+    else
+    {
+        MOB_TRACE_INFO( "GNSS already running in background mode\n" );
+    }
     
     // Send time to GNSS (module is now powered)
     gateway_assistance_send_time_to_gnss(true);
@@ -450,8 +464,11 @@ static uint32_t mob_process_piw( void )
         PIW_GNSS_MAX_HACC_M,
         &fix );
     
-    // Stop GNSS
-    gnss_scan_stop();
+    // Stop GNSS (if not running in background mode)
+    if( !gateway_assistance_is_background_gnss_active() )
+    {
+        gnss_scan_stop();
+    }
     
     // Check for BLE interrupt during scan
     if( tracker_state.ble_found )

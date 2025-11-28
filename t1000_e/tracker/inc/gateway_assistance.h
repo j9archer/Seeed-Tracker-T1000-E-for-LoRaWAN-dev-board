@@ -75,7 +75,9 @@ typedef struct {
     uint32_t unix_time;          // Time when position received (from modem GPS time)
     uint32_t rtc_at_receipt;     // Local RTC when message received
     uint32_t time_uncertainty;   // Estimated time uncertainty in seconds
-    bool valid;                  // Cache contains valid data
+    uint32_t time_rtc_at_sync;   // Local RTC when time was synced
+    bool valid;                  // Position cache contains valid data
+    bool time_synced;            // Time has been synced (DeviceTimeReq success)
 } position_time_cache_t;
 
 /*
@@ -254,6 +256,77 @@ bool gateway_assistance_send_hot_start(void);
  * @returns true if command was sent successfully
  */
 bool gateway_assistance_send_test_position(void);
+
+/*!
+ * @brief Periodic almanac maintenance check (call every 24 hours while charging)
+ *
+ * When device is on charge, this should be called periodically (every 24 hours)
+ * to check almanac status and perform maintenance if needed.
+ *
+ * The function will:
+ * 1. Power on GNSS module
+ * 2. Refresh almanac status via PAIR550
+ * 3. If maintenance needed, run 750-second almanac download scan
+ * 4. Power off GNSS module
+ *
+ * @returns true if maintenance was performed, false if not needed
+ */
+bool gateway_assistance_periodic_almanac_maintenance(void);
+
+/*!
+ * @brief Check if it's time for periodic almanac status check
+ *
+ * Returns true if:
+ * - Device is on charge AND
+ * - Last almanac check was >24 hours ago
+ *
+ * @returns true if periodic check should be performed
+ */
+bool gateway_assistance_should_check_almanac(void);
+
+/*
+ * -----------------------------------------------------------------------------
+ * --- BACKGROUND GNSS MODE (Charging/Docked) ---------------------------------
+ * -----------------------------------------------------------------------------
+ * When device is charging/docked, we run continuous GNSS in background to
+ * maintain almanac and ephemeris data. This coexists with normal tracking.
+ */
+
+/*!
+ * @brief Check charge state and manage background GNSS mode
+ *
+ * Call this periodically (e.g., in main loop or on alarm).
+ * Detects charge state transitions and:
+ * - On charge connect: Starts background GNSS scan
+ * - On charge disconnect: Stops background GNSS scan
+ *
+ * When background mode is active, normal tracking scans can still run
+ * and will use the already-active GNSS module.
+ */
+void gateway_assistance_check_charge_state(void);
+
+/*!
+ * @brief Check if background GNSS mode is active
+ *
+ * @returns true if GNSS is running in background (charging mode)
+ */
+bool gateway_assistance_is_background_gnss_active(void);
+
+/*!
+ * @brief Start background GNSS mode manually
+ *
+ * Starts continuous GNSS scanning for almanac/ephemeris maintenance.
+ * Normally called automatically when charge is detected.
+ */
+void gateway_assistance_start_background_gnss(void);
+
+/*!
+ * @brief Stop background GNSS mode manually
+ *
+ * Stops continuous GNSS scanning.
+ * Normally called automatically when charge is removed.
+ */
+void gateway_assistance_stop_background_gnss(void);
 
 #ifdef __cplusplus
 }

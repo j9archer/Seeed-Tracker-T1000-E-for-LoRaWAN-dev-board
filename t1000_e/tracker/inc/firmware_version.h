@@ -19,17 +19,25 @@ extern "C" {
 #define FIRMWARE_VERSION_MAJOR      1
 #define FIRMWARE_VERSION_MINOR      0
 #define FIRMWARE_VERSION_PATCH      0
-#define FIRMWARE_VERSION_BUILD      6
+#define FIRMWARE_VERSION_BUILD      7
 
-// Version string (e.g., "1.0.0-b6")
-#define FIRMWARE_VERSION_STRING     "1.0.0-b6"
+// Version string (e.g., "1.0.0-b7")
+#define FIRMWARE_VERSION_STRING     "1.0.0-b7"
 
 // Version features (changelog for this version)
-#define FIRMWARE_VERSION_FEATURES   "marine_gnss, gateway_assistance rename"
+#define FIRMWARE_VERSION_FEATURES   "marine_gnss integrated into scan process"
 
 /*
  * Version History:
  * 
+ * v1.0.0-b7 (2025-11-27)
+ *   - INTEGRATED: marine_gnss replaces default GNSS in app_tracker_scan_process
+ *   - REMOVED: app_get_adaptive_gnss_scan_duration() - superseded by marine_gnss
+ *   - CHANGED: app_tracker_gnss_scan_begin() now calls mob_tracker_activate()
+ *   - CHANGED: Scan process uses mob_tracker_process() for timing
+ *   - Marine GNSS provides: MOB burst -> PIW phases with quality-driven exit
+ *   - BLE beacon detection cancels marine_gnss tracking
+ *
  * v1.0.0-b6 (2025-11-26)
  *   - RENAMED: mob_piw_tracker -> marine_gnss (clearer module purpose)
  *   - RENAMED: vessel_assistance -> gateway_assistance (supports any gateway)

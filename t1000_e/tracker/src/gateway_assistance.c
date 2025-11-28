@@ -57,13 +57,16 @@ static position_time_cache_t position_cache = {
     .valid = false
 };
 
+// Background GNSS mode state (for charging/docked mode)
+static bool background_gnss_active = false;
+static bool last_charge_state = false;
+
 /*
  * -----------------------------------------------------------------------------
  * --- PRIVATE FUNCTIONS DECLARATION -------------------------------------------
  */
 
 static uint8_t calculate_nmea_checksum(const char* sentence);
-static bool send_ag3335_command(const char* command);
 static void gnss_power_on_for_command(void);
 static void gnss_power_off_after_command(void);
 
@@ -76,6 +79,7 @@ void gateway_assistance_init(void)
 {
     memset(&position_cache, 0, sizeof(position_cache));
     position_cache.valid = false;
+    position_cache.time_synced = false;
     
     HAL_DBG_TRACE_INFO("Gateway assistance system initialized\n");
 }
@@ -105,10 +109,13 @@ bool gateway_assistance_handle_downlink(const uint8_t* payload, uint8_t size)
         // Convert GPS time to Unix time (GPS epoch Jan 6, 1980 = Unix 315964800)
         position_cache.unix_time = gps_time_s + 315964800 - 18; // subtract leap seconds
         position_cache.time_uncertainty = 2; // DeviceTimeReq typically ±1-2 seconds
+        position_cache.time_rtc_at_sync = hal_rtc_get_time_s();
+        position_cache.time_synced = true;
     } else {
         // Fallback to RTC if modem time not available
         position_cache.unix_time = hal_rtc_get_time_s();
         position_cache.time_uncertainty = 3600; // Large uncertainty without time sync
+        // Don't mark as synced - this is just RTC time
     }
     
     position_cache.rtc_at_receipt = hal_rtc_get_time_s();
@@ -164,24 +171,25 @@ assistance_quality_t gateway_assistance_get_quality(void)
 
 uint32_t gateway_assistance_get_estimated_time(void)
 {
-    if (!position_cache.valid) {
+    if (!position_cache.time_synced) {
         return hal_rtc_get_time_s();
     }
     
     uint32_t current_rtc = hal_rtc_get_time_s();
-    uint32_t elapsed = current_rtc - position_cache.rtc_at_receipt;
+    uint32_t elapsed = current_rtc - position_cache.time_rtc_at_sync;
     
     return position_cache.unix_time + elapsed;
 }
 
 uint32_t gateway_assistance_get_time_uncertainty(void)
 {
-    if (!position_cache.valid) {
-        return 3600; // 1 hour if no data
+    // Check if time has been synced (from DeviceTimeReq or gateway downlink)
+    if (!position_cache.time_synced) {
+        return 3600; // 1 hour if no time sync
     }
     
     uint32_t current_rtc = hal_rtc_get_time_s();
-    uint32_t elapsed_hours = (current_rtc - position_cache.rtc_at_receipt) / 3600;
+    uint32_t elapsed_hours = (current_rtc - position_cache.time_rtc_at_sync) / 3600;
     
     // Base uncertainty + RTC drift (assume 3 seconds per day = 0.125 sec/hour)
     uint32_t drift_uncertainty = (elapsed_hours * 125) / 1000;
@@ -213,19 +221,26 @@ bool gateway_assistance_is_charging(void)
 
 bool gateway_assistance_needs_almanac_maintenance(uint32_t days_threshold)
 {
-    if (!position_cache.valid) {
-        // No fix ever received - almanac is likely stale, maintenance needed
-        HAL_DBG_TRACE_INFO("Almanac maintenance needed - no prior fix\n");
+    // Primary check: Use PAIR550 almanac status from GNSS module
+    // This is the authoritative source - the module knows its own almanac state
+    if (gnss_almanac_needs_maintenance()) {
+        uint8_t sv_count = gnss_almanac_get_valid_sv_count();
+        HAL_DBG_TRACE_INFO("Almanac maintenance needed - PAIR550 shows %u valid SVs\n", sv_count);
         return true;
     }
     
-    uint32_t current_time = hal_rtc_get_time_s();
-    uint32_t time_since_fix = current_time - position_cache.rtc_at_receipt;
-    uint32_t days_since_fix = time_since_fix / 86400;
-    
-    if (days_since_fix >= days_threshold) {
-        HAL_DBG_TRACE_INFO("Almanac maintenance needed - %lu days since last fix\n", days_since_fix);
-        return true;
+    // Secondary check: Time since last position update
+    // Even with valid almanac, if we haven't had a fix in a long time,
+    // the ephemeris will be stale and a maintenance scan could help
+    if (position_cache.valid) {
+        uint32_t current_time = hal_rtc_get_time_s();
+        uint32_t time_since_fix = current_time - position_cache.rtc_at_receipt;
+        uint32_t days_since_fix = time_since_fix / 86400;
+        
+        if (days_since_fix >= days_threshold) {
+            HAL_DBG_TRACE_INFO("Almanac OK but ephemeris likely stale - %lu days since last fix\n", days_since_fix);
+            return true;
+        }
     }
     
     return false;
@@ -256,9 +271,14 @@ bool gateway_assistance_send_time_to_gnss(bool gnss_is_active)
     // Current leap seconds between GPS and UTC = 18 seconds
     uint32_t unix_time = gps_time_s + 315964800 - 18;
     
-    // Update position cache with new time
+    // Update position cache with new time - mark as synced!
     position_cache.unix_time = unix_time;
     position_cache.time_uncertainty = 2; // DeviceTimeReq typically ±1-2 seconds
+    position_cache.time_rtc_at_sync = hal_rtc_get_time_s();
+    position_cache.time_synced = true;
+    
+    HAL_DBG_TRACE_INFO("Time synced from modem - uncertainty now %lu s\n", 
+                       position_cache.time_uncertainty);
     
     struct tm timeinfo;
     time_t unix_time_t = (time_t)unix_time;
@@ -279,7 +299,7 @@ bool gateway_assistance_send_time_to_gnss(bool gnss_is_active)
         gnss_power_on_for_command();
     }
     
-    bool result = send_ag3335_command(time_cmd);
+    bool result = gnss_send_command(time_cmd);
     
     if (result) {
         HAL_DBG_TRACE_INFO("UTC time written to AG3335 NVRAM (PAIR590): %04d-%02d-%02d %02d:%02d:%02d\n",
@@ -322,7 +342,7 @@ bool gateway_assistance_send_position_to_gnss(bool gnss_is_active)
         gnss_power_on_for_command();
     }
     
-    bool result = send_ag3335_command(pos_cmd);
+    bool result = gnss_send_command(pos_cmd);
     
     if (result) {
         HAL_DBG_TRACE_INFO("Position written to AG3335 NVRAM (PAIR600): %.6f, %.6f\n",
@@ -373,9 +393,10 @@ bool gateway_assistance_is_gnss_ready(void)
         return false;
     }
     
-    // Check 2: Fresh almanac - GNSS fix within 14 days
-    if (gateway_assistance_needs_almanac_maintenance(14)) {
-        HAL_DBG_TRACE_INFO("GNSS not ready - almanac maintenance needed (>14 days since fix)\n");
+    // Check 2: Valid almanac from PAIR550 status check
+    if (!gnss_almanac_is_valid()) {
+        uint8_t sv_count = gnss_almanac_get_valid_sv_count();
+        HAL_DBG_TRACE_INFO("GNSS not ready - almanac invalid (%u SVs, need >=4 GPS)\n", sv_count);
         return false;
     }
     
@@ -395,7 +416,8 @@ bool gateway_assistance_is_gnss_ready(void)
     }
     
     // All criteria met - GNSS ready for warm start
-    HAL_DBG_TRACE_INFO("GNSS READY - time OK, almanac fresh, position <4h old\n");
+    uint8_t sv_count = gnss_almanac_get_valid_sv_count();
+    HAL_DBG_TRACE_INFO("GNSS READY - time OK, almanac valid (%u SVs), position <4h old\n", sv_count);
     return true;
 }
 
@@ -409,7 +431,7 @@ bool gateway_assistance_send_warm_start(void)
     
     HAL_DBG_TRACE_INFO("Sending GNSS warm start command (PAIR005)\n");
     
-    return send_ag3335_command(warm_start_cmd);
+    return gnss_send_command(warm_start_cmd);
 }
 
 bool gateway_assistance_send_hot_start(void)
@@ -422,7 +444,7 @@ bool gateway_assistance_send_hot_start(void)
     
     HAL_DBG_TRACE_INFO("Sending GNSS hot start command (PAIR004)\n");
     
-    return send_ag3335_command(hot_start_cmd);
+    return gnss_send_command(hot_start_cmd);
 }
 
 bool gateway_assistance_send_test_position(void)
@@ -440,7 +462,81 @@ bool gateway_assistance_send_test_position(void)
     HAL_DBG_TRACE_INFO("[TEST] Sending hardcoded position to AG3335 NVRAM\n");
     HAL_DBG_TRACE_INFO("[TEST] Position: 37.099775°N, 8.460805°W, altitude 63m\n");
     
-    return send_ag3335_command(pos_cmd);
+    return gnss_send_command(pos_cmd);
+}
+
+bool gateway_assistance_should_check_almanac(void)
+{
+    // Only check while charging to preserve battery
+    if (!gateway_assistance_is_charging()) {
+        return false;
+    }
+    
+    // Check if last almanac status check was more than 24 hours ago
+    uint32_t last_check = gnss_almanac_get_last_check_time();
+    uint32_t current_time = hal_rtc_get_time_s();
+    
+    // If never checked (last_check == 0) or >24 hours since last check
+    uint32_t hours_since_check = (current_time - last_check) / 3600;
+    
+    if (last_check == 0 || hours_since_check >= 24) {
+        HAL_DBG_TRACE_INFO("Almanac check due - %lu hours since last check (charging=%d)\n", 
+                           hours_since_check, 1);
+        return true;
+    }
+    
+    return false;
+}
+
+bool gateway_assistance_periodic_almanac_maintenance(void)
+{
+    HAL_DBG_TRACE_INFO("=== Periodic Almanac Maintenance Check ===\n");
+    
+    // Power on GNSS module for status check
+    gnss_power_on_for_command();
+    
+    // Refresh almanac status via PAIR550
+    gnss_almanac_refresh_status();
+    
+    // Check if maintenance is needed
+    bool maintenance_needed = gnss_almanac_needs_maintenance();
+    
+    if (maintenance_needed) {
+        HAL_DBG_TRACE_INFO("Almanac maintenance required - starting 750s scan\n");
+        
+        // Keep module powered and run a full scan for almanac download
+        // Note: We're already powered from gnss_power_on_for_command()
+        // so we need to properly transition to scan mode
+        
+        gnss_fix_t fix;
+        uint32_t scan_duration = gateway_assistance_get_almanac_scan_duration();
+        
+        // Run extended scan with relaxed quality requirements
+        // We just want to keep the module on long enough to download almanac
+        bool got_fix = gnss_scan_until_good(scan_duration * 1000, 99.0f, 999.0f, &fix);
+        
+        if (got_fix && fix.valid) {
+            HAL_DBG_TRACE_INFO("Almanac maintenance complete - got fix: %.6f, %.6f\n",
+                               fix.latitude / 1000000.0, fix.longitude / 1000000.0);
+            
+            // Store the fix for future assistance
+            gateway_assistance_store_own_fix(fix.latitude, fix.longitude);
+        } else {
+            HAL_DBG_TRACE_INFO("Almanac maintenance scan complete (no fix, but almanac should be updated)\n");
+        }
+        
+        // Refresh status after scan to confirm almanac improvement
+        gnss_almanac_refresh_status();
+        
+        gnss_power_off_after_command();
+        return true;
+    } else {
+        uint8_t sv_count = gnss_almanac_get_valid_sv_count();
+        HAL_DBG_TRACE_INFO("Almanac healthy - %u SVs valid for 14-day horizon, no maintenance needed\n", sv_count);
+        
+        gnss_power_off_after_command();
+        return false;
+    }
 }
 
 /*
@@ -460,36 +556,8 @@ static uint8_t calculate_nmea_checksum(const char* sentence)
     return checksum;
 }
 
-static bool send_ag3335_command(const char* command)
-{
-    char full_command[128];
-    uint8_t checksum = calculate_nmea_checksum(command);
-    
-    // AG3335 GNSS Module Assistance Capabilities:
-    // - PAIR004: Hot start (uses available ephemeris/almanac)
-    // - PAIR005: Warm start (no ephemeris, uses almanac)
-    // - PAIR006: Cold start (no assistance data)
-    // - PAIR010: Request aiding data from network
-    // - PAIR496-509: EPOC orbit prediction
-    // - PAIR590: UTC time reference (writes to NVRAM)
-    // - PAIR600: Reference position (writes to NVRAM)
-    //
-    // Expected ACK format: $PAIR001,<cmd_num>,0*CS\r\n (0 = success)
-    // Example: $PAIR001,590,0*37 for PAIR590 success
-    //
-    // Format for NMEA commands: $PAIR_CMD,params*checksum\r\n
-    snprintf(full_command, sizeof(full_command), "%s*%02X\r\n", command, checksum);
-    
-    HAL_DBG_TRACE_INFO("Sending AG3335 command: %s*%02X (x3 for reliability)\n", command, checksum);
-    
-    // Send command multiple times for reliability
-    for (uint8_t i = 0; i < 3; i++) {
-        hal_uart_0_tx((uint8_t*)full_command, strlen(full_command));
-        hal_mcu_wait_ms(GNSS_CMD_ACK_TIMEOUT_MS);
-    }
-    
-    return true;
-}
+// NOTE: send_ag3335_command() has been moved to gnss_send_command() in ag3335.c
+// All callers now use gnss_send_command() from ag3335.h
 
 static void gnss_power_on_for_command(void)
 {
@@ -532,6 +600,70 @@ static void gnss_power_off_after_command(void)
     hal_gpio_set_value(AG3335_POWER_EN, 0);
     
     HAL_DBG_TRACE_INFO("AG3335 powered off after NVRAM command\n");
+}
+
+/*
+ * -----------------------------------------------------------------------------
+ * --- BACKGROUND GNSS MODE (Charging/Docked) ---------------------------------
+ * -----------------------------------------------------------------------------
+ */
+
+void gateway_assistance_check_charge_state(void)
+{
+    bool current_charge_state = gateway_assistance_is_charging();
+    
+    // Detect charge state transitions
+    if (current_charge_state && !last_charge_state) {
+        // Just connected to charger - start background GNSS
+        HAL_DBG_TRACE_INFO("=== CHARGE CONNECTED - Starting background GNSS ===\n");
+        gateway_assistance_start_background_gnss();
+    }
+    else if (!current_charge_state && last_charge_state) {
+        // Just disconnected from charger - stop background GNSS
+        HAL_DBG_TRACE_INFO("=== CHARGE DISCONNECTED - Stopping background GNSS ===\n");
+        gateway_assistance_stop_background_gnss();
+    }
+    
+    last_charge_state = current_charge_state;
+}
+
+bool gateway_assistance_is_background_gnss_active(void)
+{
+    return background_gnss_active;
+}
+
+void gateway_assistance_start_background_gnss(void)
+{
+    if (background_gnss_active) {
+        HAL_DBG_TRACE_INFO("Background GNSS already active\n");
+        return;
+    }
+    
+    HAL_DBG_TRACE_INFO("Starting background GNSS mode (almanac/ephemeris maintenance)\n");
+    
+    // Start GNSS scan - this powers on the module and locks sleep
+    gnss_scan_start();
+    
+    background_gnss_active = true;
+    
+    HAL_DBG_TRACE_INFO("Background GNSS mode ACTIVE - module running continuously\n");
+}
+
+void gateway_assistance_stop_background_gnss(void)
+{
+    if (!background_gnss_active) {
+        HAL_DBG_TRACE_INFO("Background GNSS not active\n");
+        return;
+    }
+    
+    HAL_DBG_TRACE_INFO("Stopping background GNSS mode\n");
+    
+    // Stop GNSS scan - this powers off the module
+    gnss_scan_stop();
+    
+    background_gnss_active = false;
+    
+    HAL_DBG_TRACE_INFO("Background GNSS mode STOPPED\n");
 }
 
 /* --- EOF ------------------------------------------------------------------ */
