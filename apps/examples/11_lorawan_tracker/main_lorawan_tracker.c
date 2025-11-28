@@ -680,7 +680,12 @@ static void on_modem_time_updated( smtc_modem_event_time_status_t status )
         HAL_DBG_TRACE_INFO( "Modem time is now synchronized with network\n" );
         HAL_DBG_TRACE_INFO( "========================\n" );
         
-        /* Note: PAIR590 time command sent during GNSS scans when AG3335 is awake */
+        /* Send time to GNSS if background mode is active (module already powered) */
+        if( gateway_assistance_is_background_gnss_active() )
+        {
+            HAL_DBG_TRACE_INFO( "Background GNSS active - sending time update (PAIR590)\n" );
+            gateway_assistance_send_time_to_gnss( true );  // true = GNSS already active
+        }
         
         /* Update last sync timestamp for periodic resync */
         last_time_sync_s = rtc_s;
