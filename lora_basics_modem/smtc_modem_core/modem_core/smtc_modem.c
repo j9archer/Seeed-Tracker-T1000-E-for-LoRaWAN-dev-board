@@ -151,6 +151,8 @@ smtc_modem_services_t smtc_modem_services_ctx;
 
 // LBT configuration status
 static bool lbt_config_available = false;
+static bool next_uplink_forced_dr_enabled = false;
+static uint8_t next_uplink_forced_dr = 0;
 
 // user_radio_access
 static rp_status_t user_radio_irq_status;
@@ -1512,6 +1514,18 @@ smtc_modem_return_code_t smtc_modem_adr_set_profile( uint8_t stack_id, smtc_mode
         SMTC_MODEM_HAL_TRACE_ERROR( "%s call with adr profile not valid\n", __func__ );
     }
     return return_code;
+}
+
+smtc_modem_return_code_t smtc_modem_set_next_uplink_datarate( uint8_t stack_id, uint8_t dr )
+{
+    UNUSED( stack_id );
+    RETURN_BUSY_IF_TEST_MODE( );
+
+    /* Consumed by the next empty/application TX request and copied into its supervisor task. */
+    next_uplink_forced_dr_enabled = true;
+    next_uplink_forced_dr = dr;
+
+    return SMTC_MODEM_RC_OK;
 }
 
 smtc_modem_return_code_t smtc_modem_get_available_datarates( uint8_t stack_id, uint16_t* available_datarates_mask )
@@ -3082,6 +3096,10 @@ static smtc_modem_return_code_t smtc_modem_send_empty_tx( uint8_t f_port, bool f
         task_send.PacketType        = confirmed;
         task_send.sizeIn            = 0;
         task_send.time_to_execute_s = smtc_modem_hal_get_time_in_s( );
+        /* Copy the one-shot DR override into the task; queued tasks must not depend on later global ADR state. */
+        task_send.forced_dr_enabled = next_uplink_forced_dr_enabled;
+        task_send.forced_dr         = next_uplink_forced_dr;
+        next_uplink_forced_dr_enabled = false;
 
         if( modem_supervisor_add_task( &task_send ) != TASK_VALID )
         {
@@ -3144,6 +3162,10 @@ static smtc_modem_return_code_t smtc_modem_send_tx( uint8_t f_port, bool confirm
         task_send.PacketType        = confirmed;
         task_send.sizeIn            = payload_length;
         task_send.time_to_execute_s = smtc_modem_hal_get_time_in_s( );
+        /* Copy the one-shot DR override into the task; queued tasks must not depend on later global ADR state. */
+        task_send.forced_dr_enabled = next_uplink_forced_dr_enabled;
+        task_send.forced_dr         = next_uplink_forced_dr;
+        next_uplink_forced_dr_enabled = false;
 
         // SMTC_MODEM_HAL_TRACE_INFO( "add task user tx payload with payload size = %d \n ", payload_length );
         if( modem_supervisor_add_task( &task_send ) != TASK_VALID )

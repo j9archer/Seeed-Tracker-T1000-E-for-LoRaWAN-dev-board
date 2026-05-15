@@ -53,12 +53,14 @@
  * --- PRIVATE MACROS-----------------------------------------------------------
  */
 
+// Condensed single-line format for LoRa events (reduces log noise)
+// Original format used multi-line boxes with asterisks
 #define DBG_PRINT_WITH_LINE( ... )                                                     \
     do                                                                                 \
     {                                                                                  \
-        SMTC_MODEM_HAL_TRACE_MSG( "\n  *************************************\n  * " ); \
+        SMTC_MODEM_HAL_TRACE_MSG( "LORA: " );                                          \
         SMTC_MODEM_HAL_TRACE_PRINTF( __VA_ARGS__ );                                    \
-        SMTC_MODEM_HAL_TRACE_MSG( "\n  *************************************\n" );     \
+        SMTC_MODEM_HAL_TRACE_MSG( "\n" );                                              \
     } while( 0 );
 
 /*

@@ -116,7 +116,14 @@ function unpack (messageValue) {
             case '22':
                 packageLen = 30
                 if (remainMessage.length < packageLen) {
-                    return frameArray
+                    // Some firmwares can send a short 0x22 frame with only
+                    // event/battery/temp (5 bytes total including dataId).
+                    // Decode what is available instead of dropping the frame.
+                    if (remainMessage.length >= 10) {
+                        packageLen = remainMessage.length
+                    } else {
+                        return frameArray
+                    }
                 }
                 dataValue = remainMessage.substring(2, packageLen)
                 messageValue = remainMessage.substring(packageLen)
@@ -271,24 +278,30 @@ function deserialize (dataId, dataValue) {
         case '22':
             collectTime = timestampSec
             measurementArray = this.getT1000EUplinkHeaderWithSensor(dataValue, collectTime, 34, timestamp)
-            measurementArray.push({
-                measurementId: '4197',
-                measureTime: collectTime,
-                timestamp: timestamp,
-                type: 'GNSS Latitude',
-                value: this.getSensorValue(dataValue.substring(12, 20), 1000000),
-                measurementValue: this.getSensorValue(dataValue.substring(12, 20), 1000000),
-                motionId: this.getMotionId(dataValue.substring(0, 2))
-            })
-            measurementArray.push({
-                measurementId: '4198',
-                measureTime: collectTime,
-                timestamp: timestamp,
-                type: 'GNSS Longitude',
-                value: this.getSensorValue(dataValue.substring(20, 28), 1000000),
-                measurementValue: this.getSensorValue(dataValue.substring(20, 28), 1000000),
-                motionId: this.getMotionId(dataValue.substring(0, 2))
-            })
+            if (dataValue.length >= 20) {
+                const latValue = this.getSensorValue(dataValue.substring(12, 20), 1000000)
+                measurementArray.push({
+                    measurementId: '4197',
+                    measureTime: collectTime,
+                    timestamp: timestamp,
+                    type: 'GNSS Latitude',
+                    value: latValue,
+                    measurementValue: latValue,
+                    motionId: this.getMotionId(dataValue.substring(0, 2))
+                })
+            }
+            if (dataValue.length >= 28) {
+                const lonValue = this.getSensorValue(dataValue.substring(20, 28), 1000000)
+                measurementArray.push({
+                    measurementId: '4198',
+                    measureTime: collectTime,
+                    timestamp: timestamp,
+                    type: 'GNSS Longitude',
+                    value: lonValue,
+                    measurementValue: lonValue,
+                    motionId: this.getMotionId(dataValue.substring(0, 2))
+                })
+            }
             break
         case '23':
             collectTime = timestampSec
@@ -700,26 +713,30 @@ function getT1000EUplinkHeaderWithSensorAnd3Axis (dataValue, collectTime, dataId
 function getT1000EUplinkHeaderWithSensor (dataValue, collectTime, dataId, timestamp) {
     let measurementArray = this.getT1000EUplinkHeader(dataValue, collectTime, dataId, timestamp)
     const motionId = this.getMotionId(dataValue.substring(0, 2))
-    const tempVal = this.getSensorValue(dataValue.substring(4, 8), 10)
-    measurementArray.push({
-        measurementId: '4097',
-        type: 'Air Temperature',
-        measureTime: collectTime,
-        timestamp: timestamp,
-        value: tempVal,
-        measurementValue: tempVal,
-        motionId
-    })
-    const lightVal = this.getSensorValue(dataValue.substring(8, 12))
-    measurementArray.push({
-        measurementId: '4199',
-        type: 'Light',
-        measureTime: collectTime,
-        timestamp: timestamp,
-        value: lightVal,
-        measurementValue: lightVal,
-        motionId
-    })
+    if (dataValue.length >= 8) {
+        const tempVal = this.getSensorValue(dataValue.substring(4, 8), 10)
+        measurementArray.push({
+            measurementId: '4097',
+            type: 'Air Temperature',
+            measureTime: collectTime,
+            timestamp: timestamp,
+            value: tempVal,
+            measurementValue: tempVal,
+            motionId
+        })
+    }
+    if (dataValue.length >= 12) {
+        const lightVal = this.getSensorValue(dataValue.substring(8, 12))
+        measurementArray.push({
+            measurementId: '4199',
+            type: 'Light',
+            measureTime: collectTime,
+            timestamp: timestamp,
+            value: lightVal,
+            measurementValue: lightVal,
+            motionId
+        })
+    }
     return measurementArray
 }
 
@@ -738,16 +755,18 @@ function getT1000EUplinkHeader (dataValue, collectTime, dataId, timestamp) {
         motionId
     })
     // Battery
-    const batt = this.getBattery(dataValue.substring(2, 4))
-    measurementArray.push({
-        measurementId: '3000',
-        type: 'Battery',
-        measureTime: collectTime,
-        timestamp: timestamp,
-        value: batt,
-        measurementValue: batt,
-        motionId
-    })
+    if (dataValue.length >= 4) {
+        const batt = this.getBattery(dataValue.substring(2, 4))
+        measurementArray.push({
+            measurementId: '3000',
+            type: 'Battery',
+            measureTime: collectTime,
+            timestamp: timestamp,
+            value: batt,
+            measurementValue: batt,
+            motionId
+        })
+    }
     return measurementArray
 }
 

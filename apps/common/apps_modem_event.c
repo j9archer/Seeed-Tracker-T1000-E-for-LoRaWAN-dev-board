@@ -40,6 +40,7 @@
 #include "apps_modem_event.h"
 #include "smtc_hal_dbg_trace.h"
 #include "smtc_modem_api_str.h"
+#include "log_filter.h"
 
 /*
  * -----------------------------------------------------------------------------
@@ -128,18 +129,18 @@ void apps_modem_event_process( void )
                     }
                     break;
                 case SMTC_MODEM_EVENT_TXDONE:
-                    HAL_DBG_TRACE_INFO( "###### ===== TX DONE EVENT ==== ######\n" );
+                    LOG_LORA( "###### ===== TX DONE EVENT ==== ######\n" );
                     switch( current_event.event_data.txdone.status )
                     {
                     case SMTC_MODEM_EVENT_TXDONE_NOT_SENT:
-                        HAL_DBG_TRACE_ERROR( "TX Done status: %s\n", smtc_modem_event_txdone_status_to_str(
-                                                                         current_event.event_data.txdone.status ) );
+                        LOG_LORA( "ERROR: TX Done status: %s\n", smtc_modem_event_txdone_status_to_str(
+                                                                   current_event.event_data.txdone.status ) );
                         break;
                     case SMTC_MODEM_EVENT_TXDONE_SENT:
                     case SMTC_MODEM_EVENT_TXDONE_CONFIRMED:
                     default:
-                        HAL_DBG_TRACE_PRINTF( "TX Done status: %s\n", smtc_modem_event_txdone_status_to_str(
-                                                                          current_event.event_data.txdone.status ) );
+                        LOG_LORA( "TX Done status: %s\n", smtc_modem_event_txdone_status_to_str(
+                                                              current_event.event_data.txdone.status ) );
                         break;
                     }
                     if( apps_modem_event_callback->tx_done != NULL )
@@ -148,12 +149,12 @@ void apps_modem_event_process( void )
                     }
                     break;
                 case SMTC_MODEM_EVENT_DOWNDATA:
-                    HAL_DBG_TRACE_INFO( "###### ===== DOWNLINK EVENT ==== ######\n" );
-                    HAL_DBG_TRACE_PRINTF( "Rx window: %s\n", smtc_modem_event_downdata_window_to_str(
-                                                                 current_event.event_data.downdata.window ) );
-                    HAL_DBG_TRACE_PRINTF( "Rx port: %d\n", current_event.event_data.downdata.fport );
-                    HAL_DBG_TRACE_PRINTF( "Rx RSSI: %d\n", current_event.event_data.downdata.rssi - 64 );
-                    HAL_DBG_TRACE_PRINTF( "Rx SNR: %d\n", current_event.event_data.downdata.snr / 4 );
+                    LOG_LORA( "###### ===== DOWNLINK EVENT ==== ######\n" );
+                    LOG_LORA( "Rx window: %s\n", smtc_modem_event_downdata_window_to_str(
+                                                        current_event.event_data.downdata.window ) );
+                    LOG_LORA( "Rx port: %d\n", current_event.event_data.downdata.fport );
+                    LOG_LORA( "Rx RSSI: %d\n", current_event.event_data.downdata.rssi - 64 );
+                    LOG_LORA( "Rx SNR: %d\n", current_event.event_data.downdata.snr / 4 );
 
                     if( apps_modem_event_callback->down_data != NULL )
                     {
@@ -221,11 +222,11 @@ void apps_modem_event_process( void )
                     }
                     break;
                 case SMTC_MODEM_EVENT_LINK_CHECK:
-                    HAL_DBG_TRACE_INFO( "###### ===== LINK CHECK EVENT ==== ######\n" );
-                    HAL_DBG_TRACE_PRINTF( "Link status: %s\n", smtc_modem_event_link_check_status_to_str(
-                                                                   current_event.event_data.link_check.status ) );
-                    HAL_DBG_TRACE_PRINTF( "Margin: %d dB\n", current_event.event_data.link_check.margin );
-                    HAL_DBG_TRACE_PRINTF( "Number of gateways: %d\n", current_event.event_data.link_check.gw_cnt );
+                    LOG_LORA( "###### ===== LINK CHECK EVENT ==== ######\n" );
+                    LOG_LORA( "Link status: %s\n", smtc_modem_event_link_check_status_to_str(
+                                                        current_event.event_data.link_check.status ) );
+                    LOG_LORA( "Margin: %d dB\n", current_event.event_data.link_check.margin );
+                    LOG_LORA( "Number of gateways: %d\n", current_event.event_data.link_check.gw_cnt );
                     if( apps_modem_event_callback->link_status != NULL )
                     {
                         apps_modem_event_callback->link_status( current_event.event_data.link_check.status,

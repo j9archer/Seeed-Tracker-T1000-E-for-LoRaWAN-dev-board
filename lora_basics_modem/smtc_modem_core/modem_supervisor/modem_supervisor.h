@@ -153,6 +153,8 @@ typedef struct smodem_task
     const uint8_t* dataIn;             //!< Data in task
     uint8_t        sizeIn;             //!< Data length in byte(s)
     uint8_t        PacketType;         //!< LoRaWAN packet type ( Tx confirmed/Unconfirmed )
+    bool           forced_dr_enabled;  //!< Force a custom fixed datarate before sending this task
+    uint8_t        forced_dr;          //!< Forced datarate when forced_dr_enabled is true
 } smodem_task;
 
 /*!

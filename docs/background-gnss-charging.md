@@ -59,6 +59,15 @@ void gateway_assistance_stop_background_gnss(void);
 - **On battery**: Background mode only activates when charging detected
 - **NVRAM persistence**: Almanac/ephemeris saved to AG3335 NVRAM, survives power cycles
 
+## Network Time Sync
+
+When the device receives a `DeviceTimeAns` from the LoRaWAN network (in response to a `DeviceTimeReq`), and background GNSS is active, the firmware sends the updated time to the GNSS module via `PAIR590`.
+
+**Why this matters:**
+- If the GNSS has satellite visibility, it already has accurate time from the satellites - no harm done
+- If the GNSS is running but has **no satellite visibility** (e.g., device is indoors/docked), the network time keeps the module's clock synchronized
+- Accurate time is critical for ephemeris/almanac validity and reduces TTFF when satellites become visible
+
 ## Log Output
 
 When charging is connected:

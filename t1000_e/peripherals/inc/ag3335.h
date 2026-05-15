@@ -87,13 +87,14 @@ bool gnss_get_quality_fix( gnss_fix_t *fix );
  * Runs GNSS scan with 1 Hz quality checks. Exits early when fix meets
  * quality thresholds or timeout is reached.
  * 
- * @param [in]  max_ms    Maximum scan duration in milliseconds
- * @param [in]  max_hdop  Maximum acceptable HDOP (e.g., 3.0)
- * @param [in]  max_hacc  Maximum acceptable horizontal accuracy in meters (e.g., 15.0)
- * @param [out] fix       Pointer to gnss_fix_t to store result
+ * @param [in]  max_ms                Maximum scan duration in milliseconds
+ * @param [in]  max_hdop              Maximum acceptable HDOP (e.g., 3.0)
+ * @param [in]  max_hacc              Maximum acceptable horizontal accuracy in meters (e.g., 15.0)
+ * @param [out] fix                   Pointer to gnss_fix_t to store result
+ * @param [in]  skip_power_management If true, don't call gnss_scan_start/stop (for background mode)
  * @returns true if good fix obtained, false if timeout or no fix
  */
-bool gnss_scan_until_good( uint32_t max_ms, float max_hdop, float max_hacc, gnss_fix_t *fix );
+bool gnss_scan_until_good( uint32_t max_ms, float max_hdop, float max_hacc, gnss_fix_t *fix, bool skip_power_management );
 
 /*!
  * @brief Check if BLE beacon was found (for scan interruption)

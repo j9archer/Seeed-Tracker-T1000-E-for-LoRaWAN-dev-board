@@ -17,6 +17,8 @@
 #include "sensor.h"
 #include "gateway_assistance.h"
 #include "app_ble_all.h"
+#include "main_lorawan_tracker_api.h"
+#include "log_filter.h"
 #include <string.h>
 #include <math.h>
 
@@ -25,14 +27,14 @@
  * --- PRIVATE MACROS-----------------------------------------------------------
  */
 
-#define MOB_TRACE_INFO(...)     HAL_DBG_TRACE_INFO(__VA_ARGS__)
-#define MOB_TRACE_WARNING(...)  HAL_DBG_TRACE_WARNING(__VA_ARGS__)
-#define MOB_TRACE_ERROR(...)    HAL_DBG_TRACE_ERROR(__VA_ARGS__)
+#define MOB_TRACE_INFO(...)     LOG_GNSS(__VA_ARGS__)
+#define MOB_TRACE_WARNING(...)  LOG_GNSS("WARN: " __VA_ARGS__)
+#define MOB_TRACE_ERROR(...)    LOG_GNSS("ERROR: " __VA_ARGS__)
 
 // NMEA debug macro - enabled for MOB burst and PIW Phase 1
 #define MOB_NMEA_DEBUG(mode, ...)  do { \
     if ((mode) == MOB_MODE_BURST || (mode) == MOB_MODE_PIW_PHASE1) { \
-        HAL_DBG_TRACE_PRINTF(__VA_ARGS__); \
+        LOG_NMEA(__VA_ARGS__); \
     } \
 } while(0)
 
@@ -83,11 +85,16 @@ static void mob_update_elapsed( void );
 static mob_tracker_mode_t mob_get_mode_for_elapsed( uint32_t elapsed_s );
 static uint32_t mob_get_interval_for_mode( mob_tracker_mode_t mode );
 static bool mob_send_position_uplink( const gnss_fix_t *fix, bool quality_ok, bool confirmed );
+static bool mob_send_position_with_policy( const gnss_fix_t *fix, bool quality_ok, bool confirmed,
+                                           app_mob_dr_policy_t policy );
 static void mob_send_cancellation_uplink( void );
 static void mob_send_no_fix_uplink( void );
+static void mob_send_no_fix_with_policy( app_mob_dr_policy_t policy );
 static uint32_t mob_process_burst( void );
 static uint32_t mob_process_piw( void );
 static void mob_run_ble_scan( void );
+
+static bool initial_burst_sent = false;
 
 /*
  * -----------------------------------------------------------------------------
@@ -116,6 +123,7 @@ bool mob_tracker_activate( void )
     memset( &tracker_state, 0, sizeof( mob_tracker_state_t ));
     tracker_state.mode = MOB_MODE_BURST;
     tracker_state.activation_rtc = hal_rtc_get_time_s( );
+    initial_burst_sent = false;
     tracker_state.elapsed_s = 0;
     gnss_continuous_active = false;
     
@@ -325,6 +333,24 @@ static uint32_t mob_get_interval_for_mode( mob_tracker_mode_t mode )
 
 static bool mob_send_position_uplink( const gnss_fix_t *fix, bool quality_ok, bool confirmed )
 {
+    app_mob_dr_policy_t policy = APP_MOB_DR_PERSISTENCE;
+
+    /* BURST favors temporal density at max DR; PHASE3 mostly persists but periodically probes minimum DR. */
+    if( tracker_state.mode == MOB_MODE_BURST )
+    {
+        policy = APP_MOB_DR_MAX;
+    }
+    else if( tracker_state.mode == MOB_MODE_PIW_PHASE3 )
+    {
+        policy = APP_MOB_DR_PHASE3_ALTERNATING;
+    }
+
+    return mob_send_position_with_policy( fix, quality_ok, confirmed, policy );
+}
+
+static bool mob_send_position_with_policy( const gnss_fix_t *fix, bool quality_ok, bool confirmed,
+                                           app_mob_dr_policy_t policy )
+{
     mob_position_uplink_t payload;
     memset( &payload, 0, sizeof( payload ));
     
@@ -345,15 +371,14 @@ static bool mob_send_position_uplink( const gnss_fix_t *fix, bool quality_ok, bo
                    payload.latitude, payload.longitude, 
                    fix->hdop, payload.quality_flags, payload.battery );
     
-    // Send uplink
-    smtc_modem_return_code_t rc = smtc_modem_request_uplink( 
-        stack_id, 
-        LORAWAN_MOB_PORT, 
-        confirmed,
-        (uint8_t*)&payload, 
-        sizeof( payload ));
-    
-    return ( rc == SMTC_MODEM_RC_OK );
+    if( tracker_state.mode == MOB_MODE_BURST && initial_burst_sent == false )
+    {
+        /* First MOB location sends the same payload across three DRs before normal 30s max-DR tracking resumes. */
+        initial_burst_sent = true;
+        return app_send_mob_initial_burst( (uint8_t*)&payload, sizeof( payload ), confirmed );
+    }
+
+    return app_send_mob_frame( (uint8_t*)&payload, sizeof( payload ), confirmed, policy );
 }
 
 static void mob_send_cancellation_uplink( void )
@@ -367,10 +392,27 @@ static void mob_send_cancellation_uplink( void )
     MOB_TRACE_INFO( "MOB cancellation uplink: elapsed=%lu s, batt=%d%%\n",
                    tracker_state.elapsed_s, payload[3] );
     
-    smtc_modem_request_uplink( stack_id, LORAWAN_MOB_PORT, true, payload, sizeof( payload ));
+    app_send_mob_frame( payload, sizeof( payload ), true, APP_MOB_DR_PERSISTENCE );
 }
 
 static void mob_send_no_fix_uplink( void )
+{
+    app_mob_dr_policy_t policy = APP_MOB_DR_PERSISTENCE;
+
+    /* No-fix reports follow the same DR strategy as position reports so the state timeline stays visible. */
+    if( tracker_state.mode == MOB_MODE_BURST )
+    {
+        policy = APP_MOB_DR_MAX;
+    }
+    else if( tracker_state.mode == MOB_MODE_PIW_PHASE3 )
+    {
+        policy = APP_MOB_DR_PHASE3_ALTERNATING;
+    }
+
+    mob_send_no_fix_with_policy( policy );
+}
+
+static void mob_send_no_fix_with_policy( app_mob_dr_policy_t policy )
 {
     uint8_t payload[5];
     payload[0] = DATA_ID_MOB_NO_FIX;
@@ -383,7 +425,15 @@ static void mob_send_no_fix_uplink( void )
                    mob_tracker_mode_str( tracker_state.mode ),
                    tracker_state.elapsed_s, payload[4] );
     
-    smtc_modem_request_uplink( stack_id, LORAWAN_MOB_PORT, false, payload, sizeof( payload ));
+    if( tracker_state.mode == MOB_MODE_BURST && initial_burst_sent == false )
+    {
+        /* If GNSS has no fix yet, still send the initial DR burst so the MOB state is announced immediately. */
+        initial_burst_sent = true;
+        app_send_mob_initial_burst( payload, sizeof( payload ), false );
+        return;
+    }
+
+    app_send_mob_frame( payload, sizeof( payload ), false, policy );
 }
 
 static uint32_t mob_process_burst( void )
@@ -431,19 +481,16 @@ static uint32_t mob_process_piw( void )
 {
     gnss_fix_t fix;
     bool got_good_fix;
-    
-    // Start GNSS for this scan (if not already running in background)
-    if( !gateway_assistance_is_background_gnss_active() )
-    {
-        gnss_scan_start();
-        hal_mcu_wait_ms(100);  // Allow module to power up
-    }
-    else
+
+    // Check if background GNSS is already active (charging mode)
+    bool background_active = gateway_assistance_is_background_gnss_active();
+
+    if( background_active )
     {
         MOB_TRACE_INFO( "GNSS already running in background mode\n" );
     }
-    
-    // Send time to GNSS (module is now powered)
+
+    // Send time to GNSS (module is now powered - either background or will be started by scan)
     gateway_assistance_send_time_to_gnss(true);
     
     // Send hot start for PIW phases (PAIR004)
@@ -458,17 +505,15 @@ static uint32_t mob_process_piw( void )
     MOB_NMEA_DEBUG(tracker_state.mode, "[PIW Phase 1] Starting quality scan\n");
     
     // Quality-driven scan with early exit
+    // When background_active=true, skip power management to keep GNSS running
     got_good_fix = gnss_scan_until_good( 
         PIW_GNSS_MAX_SCAN_MS,
         PIW_GNSS_MAX_HDOP,
         PIW_GNSS_MAX_HACC_M,
-        &fix );
+        &fix,
+        background_active );  // Skip power management if background GNSS active
     
-    // Stop GNSS (if not running in background mode)
-    if( !gateway_assistance_is_background_gnss_active() )
-    {
-        gnss_scan_stop();
-    }
+    // No need to manually stop GNSS - gnss_scan_until_good handles it based on skip_power_management
     
     // Check for BLE interrupt during scan
     if( tracker_state.ble_found )

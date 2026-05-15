@@ -1256,6 +1256,19 @@ smtc_modem_return_code_t smtc_modem_adr_get_profile( uint8_t stack_id, smtc_mode
 smtc_modem_return_code_t smtc_modem_adr_set_profile( uint8_t stack_id, smtc_modem_adr_profile_t adr_profile,
                                                      const uint8_t adr_custom_data[SMTC_MODEM_CUSTOM_ADR_DATA_LENGTH] );
 
+/*!
+ * @brief Force the datarate used by the next queued application uplink.
+ *
+ * @remark Local extension used by the crew-tag DR strategy. The value is copied into the next SEND_TASK, then cleared,
+ *         so queued burst packets can each retain their intended DR until the supervisor transmits them.
+ *
+ * @param [in] stack_id Stack identifier
+ * @param [in] dr       LoRaWAN datarate index
+ *
+ * @returns Operation status
+ */
+smtc_modem_return_code_t smtc_modem_set_next_uplink_datarate( uint8_t stack_id, uint8_t dr );
+
 /**
  * @brief Get the current available Datarate in regards of Uplink ChMash and DwellTime
  *

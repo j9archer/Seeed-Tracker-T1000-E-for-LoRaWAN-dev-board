@@ -513,7 +513,8 @@ bool gateway_assistance_periodic_almanac_maintenance(void)
         
         // Run extended scan with relaxed quality requirements
         // We just want to keep the module on long enough to download almanac
-        bool got_fix = gnss_scan_until_good(scan_duration * 1000, 99.0f, 999.0f, &fix);
+        // Note: skip_power_management=false since this is not background mode
+        bool got_fix = gnss_scan_until_good(scan_duration * 1000, 99.0f, 999.0f, &fix, false);
         
         if (got_fix && fix.valid) {
             HAL_DBG_TRACE_INFO("Almanac maintenance complete - got fix: %.6f, %.6f\n",
@@ -644,6 +645,9 @@ void gateway_assistance_start_background_gnss(void)
     // Start GNSS scan - this powers on the module and locks sleep
     gnss_scan_start();
     
+    // Enable NMEA debug for background mode monitoring
+    gnss_enable_nmea_debug(true);
+    
     background_gnss_active = true;
     
     HAL_DBG_TRACE_INFO("Background GNSS mode ACTIVE - module running continuously\n");
@@ -657,6 +661,9 @@ void gateway_assistance_stop_background_gnss(void)
     }
     
     HAL_DBG_TRACE_INFO("Stopping background GNSS mode\n");
+    
+    // Disable NMEA debug
+    gnss_enable_nmea_debug(false);
     
     // Stop GNSS scan - this powers off the module
     gnss_scan_stop();

@@ -9,6 +9,7 @@
 #include "app_beep.h"
 #include "app_led.h"
 #include "app_at_fds_datas.h"
+#include "log_filter.h"
 
 uint8_t app_lora_packet_buffer[LORAWAN_APP_DATA_MAX_SIZE] = { 0 };
 uint8_t app_lora_packet_len = 0;
@@ -80,7 +81,7 @@ void app_lora_packet_downlink_decode( uint8_t *buf, uint8_t len )
                     general_param_update = true;
                     tracker_scan_type = buf[1];
                     app_param.hardware_info.pos_strategy = buf[1];
-                    PRINTF( "tracker_scan_type = %u\r\n", tracker_scan_type );
+                    LOG_LORA( "tracker_scan_type = %u\r\n", tracker_scan_type );
                 }
             }
             break;
@@ -88,7 +89,7 @@ void app_lora_packet_downlink_decode( uint8_t *buf, uint8_t len )
             case DATA_ID_DW_PACKET_POWEWR_SEND:
             {
                 app_lora_packet_power_on_uplink( );
-                PRINTF( "new power on uplink\r\n" );
+                LOG_LORA( "new power on uplink\r\n" );
             }
             break;
 
@@ -102,12 +103,12 @@ void app_lora_packet_downlink_decode( uint8_t *buf, uint8_t len )
             {
                 if( buf[1] == 0 )
                 {
-                    PRINTF( "lora sos off\r\n" );
+                    LOG_LORA( "lora sos off\r\n" );
                     app_sos_continuous_toggle_off( );
                 }
                 else if( buf[1] == 1 )
                 {
-                    PRINTF( "lora sos on\r\n" );
+                    LOG_LORA( "lora sos on\r\n" );
                     app_sos_continuous_toggle_on( );
                 }
             }
@@ -121,7 +122,7 @@ void app_lora_packet_downlink_decode( uint8_t *buf, uint8_t len )
                     general_param_update = true;
                     tracker_periodic_interval = tmep_32 * 60;
                     app_param.hardware_info.pos_interval = tmep_32;
-                    PRINTF( "tracker_periodic_interval= %u\r\n", tracker_periodic_interval );
+                    LOG_LORA( "tracker_periodic_interval= %u\r\n", tracker_periodic_interval );
                 }                
             }
             break;
@@ -151,11 +152,11 @@ void app_lora_packet_downlink_decode( uint8_t *buf, uint8_t len )
 
             if( write_current_param_config( ))
             {
-                PRINTF( "LoRa downlink param save ok\r\n" );
+                LOG_LORA( "LoRa downlink param save ok\r\n" );
             }
             else
             {
-                PRINTF( "LoRa downlink param save fail\r\n" );
+                LOG_LORA( "LoRa downlink param save fail\r\n" );
             }
 
             if( data_id == DATA_ID_DW_PACKET_TRACK_TYPE || data_id == DATA_ID_DW_PACKET_INTEVAL_PARAM )
@@ -195,4 +196,3 @@ void app_lora_packet_params_load( void )
 
     tracker_test_mode = app_param.hardware_info.test_mode;
 }
-

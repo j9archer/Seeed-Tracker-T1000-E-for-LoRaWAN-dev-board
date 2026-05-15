@@ -333,6 +333,8 @@ eTask_valid_t modem_supervisor_add_task( smodem_task* task )
         task_manager.modem_task[task->id].dataIn            = task->dataIn;
         task_manager.modem_task[task->id].sizeIn            = task->sizeIn;
         task_manager.modem_task[task->id].PacketType        = task->PacketType;
+        task_manager.modem_task[task->id].forced_dr_enabled = task->forced_dr_enabled;
+        task_manager.modem_task[task->id].forced_dr         = task->forced_dr;
 
         return TASK_VALID;
     }
@@ -361,6 +363,17 @@ void modem_supervisor_launch_task( task_id_t id )
     case SEND_TASK_EXTENDED_1:
     case SEND_TASK_EXTENDED_2:
     case SEND_TASK: {
+        if( task_manager.modem_task[id].forced_dr_enabled == true )
+        {
+            /* Apply the DR captured when this task was queued, before the LoRaWAN send consumes the ADR profile. */
+            uint8_t fixed_dr[SMTC_MODEM_CUSTOM_ADR_DATA_LENGTH];
+            for( uint8_t i = 0; i < sizeof( fixed_dr ); i++ )
+            {
+                fixed_dr[i] = task_manager.modem_task[id].forced_dr;
+            }
+            smtc_modem_adr_set_profile( 0, SMTC_MODEM_ADR_PROFILE_CUSTOM, fixed_dr );
+        }
+
         send_status = lorawan_api_payload_send(
             task_manager.modem_task[id].fPort, task_manager.modem_task[id].fPort_present,
             task_manager.modem_task[id].dataIn, task_manager.modem_task[id].sizeIn,

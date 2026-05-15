@@ -1,6 +1,7 @@
 #include "ag3335.h"
 #include "smtc_hal.h"
 #include "smtc_hal_dbg_trace.h"
+#include "log_filter.h"
 #include <math.h>
 // Silence redefinition warning and keep local buffer size choice
 #ifdef MINMEA_MAX_SENTENCE_LENGTH
@@ -17,10 +18,16 @@
 #endif
 
 #if GNSS_TRACE
-#define GNSS_TRACE_INFO(...) HAL_DBG_TRACE_INFO(__VA_ARGS__)
+#define GNSS_TRACE_INFO(...) LOG_GNSS(__VA_ARGS__)
 #else
 #define GNSS_TRACE_INFO(...)
 #endif
+
+/* Current AG3335M_V2.6.0 firmware rejects PAIR080,7 with PAIR001 status=4.
+ * Keep the Swimming-mode hook compiled out rather than deleting it so a future
+ * GNSS chip/firmware revision can re-enable MOB/PIW navigation-mode testing.
+ */
+#define AG3335_ENABLE_SWIMMING_NAV_MODE 0
 
 #define GPS_INFO_PRINTF false
 
@@ -138,14 +145,28 @@ void gnss_nmea_parse_line( char *line )
                 PRINTF( "$xxGGA: fix quality: %d\r\n", frame_gga.fix_quality );
 #endif
                 // Dynamic NMEA debug for MOB/PIW modes
-                if( nmea_debug_enabled && frame_gga.fix_quality > 0 )
+                if( nmea_debug_enabled )
                 {
-                    PRINTF( "[NMEA] GGA: fix=%d, sats=%d, HDOP=%.1f, lat=%.6f, lon=%.6f\r\n",
-                            frame_gga.fix_quality,
-                            frame_gga.satellites_tracked,
-                            minmea_tofloat( &frame_gga.hdop ),
-                            minmea_tocoord( &frame_gga.latitude ),
-                            minmea_tocoord( &frame_gga.longitude ));
+                    if( frame_gga.fix_quality > 0 )
+                    {
+                        LOG_NMEA( "[NMEA] GGA: FIX=%d, sats=%d, HDOP=%.1f, lat=%.6f, lon=%.6f\r\n",
+                                frame_gga.fix_quality,
+                                frame_gga.satellites_tracked,
+                                minmea_tofloat( &frame_gga.hdop ),
+                                minmea_tocoord( &frame_gga.latitude ),
+                                minmea_tocoord( &frame_gga.longitude ));
+                    }
+                    else
+                    {
+                        // Show no-fix status periodically (every ~5 seconds based on satellite count changes)
+                        static int last_sats = -1;
+                        if( frame_gga.satellites_tracked != last_sats )
+                        {
+                            LOG_NMEA( "[NMEA] GGA: NO FIX (sats tracked=%d, waiting for ephemeris)\r\n",
+                                    frame_gga.satellites_tracked );
+                            last_sats = frame_gga.satellites_tracked;
+                        }
+                    }
                 }
             }
             else
@@ -182,7 +203,7 @@ void gnss_nmea_parse_line( char *line )
                     float lat_err = minmea_tofloat( &frame_gst.latitude_error_deviation );
                     float lon_err = minmea_tofloat( &frame_gst.longitude_error_deviation );
                     float hacc = sqrtf( lat_err * lat_err + lon_err * lon_err );
-                    PRINTF( "[NMEA] GST: HACC=%.1fm (lat_err=%.1f, lon_err=%.1f)\r\n",
+                    LOG_NMEA( "[NMEA] GST: HACC=%.1fm (lat_err=%.1f, lon_err=%.1f)\r\n",
                             hacc, lat_err, lon_err );
                 }
             }
@@ -209,6 +230,41 @@ void gnss_nmea_parse_line( char *line )
                         frame_gsv.sats[i].azimuth,
                         frame_gsv.sats[i].snr );
 #endif
+                // Dynamic NMEA debug - show satellite signal strengths
+                // Only show first message of each constellation and only sats with signal
+                if( nmea_debug_enabled && frame_gsv.msg_nr == 1 && frame_gsv.total_sats > 0 )
+                {
+                    // Determine constellation from NMEA talker ID in the original line
+                    // GP = GPS, GL = GLONASS, GA = Galileo, GB/BD = BeiDou
+                    const char* constellation = "??";
+                    if( strncmp( line, "$GP", 3 ) == 0 ) constellation = "GPS";
+                    else if( strncmp( line, "$GL", 3 ) == 0 ) constellation = "GLO";
+                    else if( strncmp( line, "$GA", 3 ) == 0 ) constellation = "GAL";
+                    else if( strncmp( line, "$GB", 3 ) == 0 || strncmp( line, "$BD", 3 ) == 0 ) constellation = "BDS";
+                    
+                    // Count satellites with actual signal (SNR > 0)
+                    int with_signal = 0;
+                    for( int i = 0; i < 4; i++ )
+                    {
+                        if( frame_gsv.sats[i].nr > 0 && frame_gsv.sats[i].snr > 0 )
+                            with_signal++;
+                    }
+                    
+                    char nmea_line[96];
+                    int nmea_len = snprintf( nmea_line, sizeof( nmea_line ),
+                                             "[NMEA] %s: %d SVs, %d with signal - ",
+                                             constellation, frame_gsv.total_sats, with_signal );
+                    for( int i = 0; i < 4; i++ )
+                    {
+                        // Only show satellites with valid PRN and signal
+                        if( frame_gsv.sats[i].nr > 0 && frame_gsv.sats[i].snr > 0 )
+                        {
+                            nmea_len += snprintf( nmea_line + nmea_len, sizeof( nmea_line ) - nmea_len,
+                                                  "%d:%ddB ", frame_gsv.sats[i].nr, frame_gsv.sats[i].snr );
+                        }
+                    }
+                    LOG_NMEA( "%s\r\n", nmea_line );
+                }
             }
             else
             {
@@ -309,22 +365,28 @@ void gnss_nmea_parse( char *str )
                 {
                     // Extract command number and status
                     int cmd_num = 0;
-                    int status = 0;
+                    int status = -1;  // Default to -1 to detect parse issues
                     if( sscanf( gps_nmea_line, "$PAIR001,%d,%d", &cmd_num, &status ) == 2 )
                     {
                         if( status == 0 )
                         {
-                            GNSS_TRACE_INFO( "AG3335 ACK: PAIR%03d command successful\n", cmd_num );
+                            GNSS_TRACE_INFO( "AG3335 ACK: PAIR%03d OK: %s\n", cmd_num, gps_nmea_line );
                         }
                         else
                         {
-                            GNSS_TRACE_INFO( "AG3335 ACK: PAIR%03d command FAILED (status=%d): %s\n", cmd_num, status, gps_nmea_line );
+                            GNSS_TRACE_INFO( "AG3335 ACK: PAIR%03d FAILED (status=%d): %s\n", cmd_num, status, gps_nmea_line );
                         }
+                    }
+                    else
+                    {
+                        GNSS_TRACE_INFO( "AG3335 ACK: Parse failed: %s\n", gps_nmea_line );
                     }
                 }
                 else if( strncmp( gps_nmea_line, "$PAIR550", 8 ) == 0 )
                 {
-                    // Parse almanac status response
+                    // Parse almanac status response (data line, not ACK)
+                    // Format: $PAIR550,<Constellation>,<L1_SV>,<Midi_SV>*CS
+                    GNSS_TRACE_INFO( "GNSS: PAIR550 data received: %s\n", gps_nmea_line );
                     gnss_parse_pair550_response( gps_nmea_line );
                 }
                 else if( strncmp( gps_nmea_line, "$PAIR081", 8 ) == 0 )
@@ -369,38 +431,74 @@ static volatile bool pair550_received = false;
 
 void gnss_parse_pair550_response( const char* response )
 {
-    // PAIR550 response format: $PAIR550,<GPS_bitmask>,<GLONASS_bitmask>,<BeiDou_bitmask>*CS
-    // Each bitmask is hex representing satellites with valid almanac at the queried horizon
-    // Example: $PAIR550,FFFFFFFF,00FFFFFF,0000FFFF*CS means all GPS, 24 GLONASS, 16 BeiDou
+    // PAIR550 response format per manual:
+    // $PAIR550,<Constellation>,<L1_SV>,<Midi_SV>*CS
+    //   Constellation: 0=GPS, 1=GLONASS, 2=Galileo, 3=BeiDou, 4=QZSS
+    //   L1_SV: Hex bitmask of L1 satellites with valid almanac
+    //   Midi_SV: Hex bitmask of Midi satellites (dual-band only, GLONASS only has L1)
+    // Example: $PAIR550,0,FEC0BFFF,00000FFF*24
+    //   Constellation 0 (GPS), L1=FEC0BFFF, Midi=00000FFF
     
-    uint32_t gps = 0, glonass = 0, beidou = 0;
+    int constellation = -1;
+    uint32_t l1_sv = 0, midi_sv = 0;
     
-    if( sscanf( response, "$PAIR550,%lX,%lX,%lX", &gps, &glonass, &beidou ) >= 1 )
+    // Try parsing with both L1 and Midi fields
+    int parsed = sscanf( response, "$PAIR550,%d,%lX,%lX", &constellation, &l1_sv, &midi_sv );
+    
+    if( parsed >= 2 )  // At minimum need constellation and L1_SV
     {
-        almanac_gps_valid = gps;
-        almanac_glonass_valid = glonass;
-        almanac_beidou_valid = beidou;
+        GNSS_TRACE_INFO( "GNSS: PAIR550 response - Constellation=%d, L1_SV=0x%08lX, Midi_SV=0x%08lX\n", 
+                         constellation, l1_sv, midi_sv );
+        
+        // Store based on constellation type
+        switch( constellation )
+        {
+            case 0:  // GPS
+                almanac_gps_valid = l1_sv;
+                break;
+            case 1:  // GLONASS
+                almanac_glonass_valid = l1_sv;
+                break;
+            case 3:  // BeiDou
+                almanac_beidou_valid = l1_sv;
+                break;
+            default:
+                GNSS_TRACE_INFO( "GNSS: Unknown constellation type %d\n", constellation );
+                break;
+        }
+        
         almanac_last_check_rtc = hal_rtc_get_time_s();
         almanac_status_valid = true;
         pair550_received = true;
         
-        // Count satellites with valid almanac
-        uint8_t gps_count = __builtin_popcount( gps );
-        uint8_t glonass_count = __builtin_popcount( glonass );
-        uint8_t beidou_count = __builtin_popcount( beidou );
+        // Count satellites with valid almanac (use L1 bitmask)
+        uint8_t sv_count = __builtin_popcount( l1_sv );
+        uint8_t midi_count = __builtin_popcount( midi_sv );
         
-        GNSS_TRACE_INFO( "GNSS Almanac Status (14-day horizon):\n" );
-        GNSS_TRACE_INFO( "  GPS:     0x%08lX (%u satellites)\n", gps, gps_count );
-        GNSS_TRACE_INFO( "  GLONASS: 0x%08lX (%u satellites)\n", glonass, glonass_count );
-        GNSS_TRACE_INFO( "  BeiDou:  0x%08lX (%u satellites)\n", beidou, beidou_count );
-        
-        if( gps_count >= 4 )
+        const char* constellation_name = "Unknown";
+        switch( constellation )
         {
-            GNSS_TRACE_INFO( "  Almanac: GOOD (>= 4 GPS SVs valid for 14 days)\n" );
+            case 0: constellation_name = "GPS"; break;
+            case 1: constellation_name = "GLONASS"; break;
+            case 2: constellation_name = "Galileo"; break;
+            case 3: constellation_name = "BeiDou"; break;
+            case 4: constellation_name = "QZSS"; break;
         }
-        else if( gps_count > 0 || glonass_count > 0 || beidou_count > 0 )
+        
+        GNSS_TRACE_INFO( "GNSS Almanac Status (%s, 1-day horizon):\n", constellation_name );
+        GNSS_TRACE_INFO( "  L1 SVs:   0x%08lX (%u satellites)\n", l1_sv, sv_count );
+        if( parsed >= 3 && midi_sv != 0 )
         {
-            GNSS_TRACE_INFO( "  Almanac: PARTIAL (some SVs valid, maintenance recommended)\n" );
+            GNSS_TRACE_INFO( "  Midi SVs: 0x%08lX (%u satellites)\n", midi_sv, midi_count );
+        }
+        
+        if( sv_count >= 4 )
+        {
+            GNSS_TRACE_INFO( "  Almanac: GOOD (>= 4 SVs valid)\n" );
+        }
+        else if( sv_count > 0 )
+        {
+            GNSS_TRACE_INFO( "  Almanac: PARTIAL (%u SVs valid, maintenance recommended)\n", sv_count );
         }
         else
         {
@@ -443,9 +541,10 @@ static void gnss_check_almanac_status( void )
     
     if( !pair550_received )
     {
-        // PAIR550 may return ACK status=1 if almanac data not yet available
-        // This is normal on cold start - almanac downloads during tracking
-        GNSS_TRACE_INFO( "GNSS: PAIR550 no data response (almanac may not be initialized yet)\n" );
+        // PAIR550 command was ACKed but no data response received
+        // This is normal on cold start - almanac must be downloaded from satellites first
+        // Almanac download takes 12.5 minutes of continuous satellite tracking
+        GNSS_TRACE_INFO( "GNSS: Almanac not yet available (cold start - need satellite tracking)\n" );
         almanac_status_valid = false;
         
         // Set default values indicating unknown/cold state
@@ -524,20 +623,26 @@ bool gnss_scan_start( void )
     // Use single sends with proper waits (not aggressive retries)
     hal_mcu_wait_ms( 100 );
     
+#if AG3335_ENABLE_SWIMMING_NAV_MODE
     // Query current navigation mode first
     gnss_query_navigation_mode( );
-    
-    // Try to set navigation mode to Fitness (mode=1) for MOB/PIW
-    // Note: Swimming mode (7) returns status=4 (not supported)
-    gnss_set_navigation_mode( 1 );
-    
+
+    // Try Swimming navigation mode for MOB/PIW drift tracking. Field logs on AG3335M_V2.6.0
+    // show PAIR080,7 is rejected with status=4, so this remains disabled until a future chip
+    // or firmware revision supports it.
+    gnss_set_navigation_mode( 7 );
+
     // Query again to see if it changed
     gnss_query_navigation_mode( );
+#endif
     
     // Enable NVRAM auto-save for ephemeris/almanac persistence
     gnss_enable_nvram_auto_save( );
+
+    // Wait a bit longer before almanac query - module needs time after wake
+    hal_mcu_wait_ms( 500 );
     
-    // Query almanac status (14-day horizon check)
+    // Query almanac status (1-day horizon check)
     gnss_check_almanac_status( );
 
     return true;
@@ -719,7 +824,7 @@ bool gnss_get_quality_fix( gnss_fix_t *fix )
     return fix->valid;
 }
 
-bool gnss_scan_until_good( uint32_t max_ms, float max_hdop, float max_hacc, gnss_fix_t *fix )
+bool gnss_scan_until_good( uint32_t max_ms, float max_hdop, float max_hacc, gnss_fix_t *fix, bool skip_power_management )
 {
     if( fix == NULL )
     {
@@ -733,8 +838,11 @@ bool gnss_scan_until_good( uint32_t max_ms, float max_hdop, float max_hacc, gnss
     // Clear BLE interrupt flag
     ble_beacon_found = false;
     
-    // Start GNSS scan
-    gnss_scan_start( );
+    // Start GNSS scan (unless in background mode)
+    if( !skip_power_management )
+    {
+        gnss_scan_start( );
+    }
     
     uint32_t start_time = hal_rtc_get_time_ms( );
     uint32_t elapsed = 0;
@@ -773,8 +881,11 @@ bool gnss_scan_until_good( uint32_t max_ms, float max_hdop, float max_hacc, gnss
         }
     }
     
-    // Stop GNSS module
-    gnss_scan_stop( );
+    // Stop GNSS module (unless in background mode)
+    if( !skip_power_management )
+    {
+        gnss_scan_stop( );
+    }
     
     // Get final fix status if we didn't get a good one during polling
     if( !got_good_fix && !ble_beacon_found )

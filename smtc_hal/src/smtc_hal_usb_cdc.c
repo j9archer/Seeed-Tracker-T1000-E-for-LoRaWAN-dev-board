@@ -12,6 +12,7 @@
 #include "nrf_drv_clock.h"
 #include "smtc_hal_mcu.h"
 #include "app_user_timer.h"
+#include "log_filter.h"
 
 static void cdc_acm_user_ev_handler( app_usbd_class_inst_t const * p_inst,  app_usbd_cdc_acm_user_event_t event );
 
@@ -81,6 +82,16 @@ static void cdc_acm_user_ev_handler( app_usbd_class_inst_t const * p_inst, app_u
                 NRF_LOG_INFO("RX: size: %lu char: %c", size, m_rx_buffer[0] );
 
 #ifdef APP_TRACKER
+                if( g_usb_rec_index == 0 && log_filter_handle_serial_char( ( uint8_t )m_rx_buffer[0] ))
+                {
+                    ret = app_usbd_cdc_acm_read( &m_app_cdc_acm, m_rx_buffer, READ_SIZE );
+                    continue;
+                }
+                if(( g_usb_rec_index == 0 ) && (( m_rx_buffer[0] == '\r' ) || ( m_rx_buffer[0] == '\n' )))
+                {
+                    ret = app_usbd_cdc_acm_read( &m_app_cdc_acm, m_rx_buffer, READ_SIZE );
+                    continue;
+                }
                 g_usb_rec_buffer[g_usb_rec_index ++] = m_rx_buffer[0];
                 if( g_usb_rec_index >= sizeof( g_usb_rec_buffer )) g_usb_rec_index = 0;
 #endif
@@ -200,4 +211,3 @@ bool hal_usb_cdc_is_connected( void )
 {
     return m_usb_connected;
 }
-

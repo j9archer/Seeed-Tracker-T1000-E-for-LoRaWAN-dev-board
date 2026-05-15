@@ -19,17 +19,88 @@ extern "C" {
 #define FIRMWARE_VERSION_MAJOR      1
 #define FIRMWARE_VERSION_MINOR      0
 #define FIRMWARE_VERSION_PATCH      0
-#define FIRMWARE_VERSION_BUILD      7
+#define FIRMWARE_VERSION_BUILD      22
 
-// Version string (e.g., "1.0.0-b7")
-#define FIRMWARE_VERSION_STRING     "1.0.0-b7"
+// Version string (e.g., "1.0.0-b22")
+#define FIRMWARE_VERSION_STRING     "1.0.0-b22"
 
 // Version features (changelog for this version)
-#define FIRMWARE_VERSION_FEATURES   "marine_gnss integrated into scan process"
+#define FIRMWARE_VERSION_FEATURES   "Approved UUID movement independent of Minor"
 
 /*
  * Version History:
  * 
+ * v1.0.0-b22 (2026-05-15)
+ *   - CHANGED: BLE movement detection uses strongest approved UUID beacon even when Minor is not 1..5
+ *   - CHANGED: Minor 1..5 remains required for direct BLE DR changes; unconfigured Minors only reset stability/LinkCheck timing
+ *
+ * v1.0.0-b21 (2026-05-15)
+ *   - FIXED: Strongest-beacon changes must repeat across scan sessions before resetting BLE DR baseline
+ *   - CHANGED: BLE movement hysteresis now guards both conservative and less-conservative location changes
+ *
+ * v1.0.0-b20 (2026-05-15)
+ *   - FIXED: Same BLE beacon/profile no longer pulls DR back down after LinkCheck has refined it upward
+ *   - ADDED: BLE hint state tracks UUID/MAC identity so a new strongest beacon still resets the location hint
+ *
+ * v1.0.0-b19 (2026-05-15)
+ *   - CHANGED: Strong LinkCheckAns now corrects the BLE hint DR immediately using measured margin
+ *   - CHANGED: Uses a conservative 5 dB per DR step budget while preserving 15 dB reserve margin
+ *
+ * v1.0.0-b18 (2026-05-15)
+ *   - CHANGED: PAIR080,7 Swimming navigation mode hook is compiled out after AG3335M_V2.6.0 rejected it with status=4
+ *   - NOTE: Code remains behind AG3335_ENABLE_SWIMMING_NAV_MODE for future GNSS chip/firmware revisions
+ *
+ * v1.0.0-b17 (2026-05-15)
+ *   - FIXED: Standard vessel FPort 5 uplinks now re-tag each queued send with the current crew DR
+ *   - FIXED: Prevents background MAC tasks from leaving later vessel uplinks at a stale/lower DR after a BLE hint
+ *
+ * v1.0.0-b16 (2026-05-15)
+ *   - CHANGED: LinkCheck logs now state that Basics Modem schedules a dedicated MAC-only FPort 0 task
+ *   - ADDED: TODO to revisit LinkCheck scheduling after the gateway shim forwards FOpts MAC commands by default
+ *
+ * v1.0.0-b15 (2026-05-15)
+ *   - FIXED: BLE DR hints now work with build-time whitelisted UUIDs even when the config app extra UUID is empty
+ *   - ADDED: BLE log explains when DR hints are disabled because no approved UUID source is configured
+ *
+ * v1.0.0-b14 (2026-05-15)
+ *   - CHANGED: Restored MDR-012 behavior: all selected DRs clamp to lr_DR_min/lr_DR_max
+ *   - CHANGED: BLE Minor profile 5 and MOB/SOS minimum paths use the same configured SOS-low/minimum-safe DR
+ *   - NOTE: This reverses the b13 experiment that allowed MOB/SOS below lr_DR_min
+ *
+ * v1.0.0-b13 (2026-05-15)
+ *   - CHANGED: Vessel DR floor now respects lr_DR_min while MOB/SOS can use region_min + 1 for emergency penetration
+ *   - CHANGED: BLE Minor profile 5 now selects the vessel floor; the lower emergency floor is reserved for MOB/SOS
+ *   - FIXED: Forced next-uplink DR tagging now uses the same clamped DR that was applied to the modem profile
+ *
+ * v1.0.0-b12 (2026-05-15)
+ *   - CHANGED: GNSS scan startup now tries PAIR080,7 Swimming navigation mode for MOB/PIW validation
+ *   - NOTE: Some AG3335 firmware may reject mode 7 with PAIR001 status=4; PAIR081 query logs the result
+ *
+ * v1.0.0-b11 (2026-05-15)
+ *   - ADDED: Build-time approved iBeacon UUID whitelist for production beacon families
+ *   - CHANGED: Config app Group UUID is treated as one extra approved full UUID, not the only scanner filter
+ *   - CHANGED: BLE UUID approval now requires exact 16-byte matches instead of prefix/substring matching
+ *
+ * v1.0.0-b10 (2026-05-15)
+ *   - ADDED: BLE scan diagnostics under the B log filter: scan start/stop summaries, approved iBeacon details, rejected UUID samples
+ *   - ADDED: DR hint logging showing the strongest approved beacon, Major, Minor, RSSI, UUID, and MAC
+ *
+ * v1.0.0-b9 (2026-05-15)
+ *   - ADDED: Real-time serial log filters using single-key toggles: L=LORA, N=NMEA, G=GNSS, B=BLE, W=WIFI, ?=status
+ *   - CHANGED: Semtech modem/RP traces and LoRaWAN TX/RX/LinkCheck events are tagged as LORA for RF-only debugging
+ *   - CHANGED: GNSS lifecycle logs and MOB/PIW logs are tagged as GNSS; NMEA quality lines are tagged as NMEA
+ *   - FIXED: Literal escaped line breaks in scheduler logs now print as real CR/LF line breaks
+ *
+ * v1.0.0-b8 (2026-05-15)
+ *   - ADDED: Mission-oriented crew tag DR strategy with ADR disabled and NbTrans=1
+ *   - ADDED: MOB/SOS DR policies: initial multi-DR bursts, max-DR early tracking, persistence/minimum fallback
+ *   - ADDED: Per-task forced DR support so queued burst uplinks retain distinct datarates
+ *   - ADDED: BLE beacon RF hints using approved iBeacon UUIDs and Minor values 1..5
+ *   - ADDED: BLE hint hysteresis: conservative moves apply immediately, less-conservative moves require scan-session confirmation
+ *   - CHANGED: Vessel RF validation uses LinkCheckReq margin/gateway count instead of confirmed health uplinks
+ *   - LinkCheckReq runs after stable BLE profiles and periodically, with a longer interval when valid BLE hints are active
+ *   - See MDR-012 for the BLE hint + LinkCheck DR decision record
+ *
  * v1.0.0-b7 (2025-11-27)
  *   - INTEGRATED: marine_gnss replaces default GNSS in app_tracker_scan_process
  *   - REMOVED: app_get_adaptive_gnss_scan_duration() - superseded by marine_gnss

@@ -9,6 +9,7 @@
 #include "smtc_hal.h"
 #include "smtc_modem_hal.h"
 #include "smtc_board.h"
+#include "log_filter.h"
 
 #include "modem_pinout.h"
 
@@ -290,7 +291,9 @@ void smtc_modem_hal_print_trace( const char* fmt, ... )
 {
     va_list args;
     va_start( args, fmt );
-    hal_trace_print( fmt, args );
+    // Treat Semtech modem/RP traces as RF diagnostics so the serial filter can
+    // hide noisy TX/RX window chatter while leaving GNSS/NMEA visible.
+    log_filter_vprintf( LOG_FILTER_LORA, fmt, args );
     va_end( args );
 }
 

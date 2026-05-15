@@ -22,6 +22,8 @@
 #include "app_ble_nus.h"
 #include "app_ble_all.h"
 #include "app_user_timer.h"
+#include "log_filter.h"
+#include "crew_dr_strategy_config.h"
 
 #define APP_BLE_CONN_CFG_TAG            1                                           /**< A tag identifying the SoftDevice BLE configuration. */
 #define APP_BLE_OBSERVER_PRIO           3                                           /**< Application's BLE observer priority. You shouldn't need to modify this value. */
@@ -66,6 +68,7 @@ static ble_gap_scan_params_t const m_scan_param =
 
 #define BLE_BEACON_BUF_MAX  16
 #define BLE_BEACON_SEND_MUM 5
+#define BLE_SCAN_DEBUG_REJECT_LOG_MAX 8
 
 bool s_filter_flag = false;
 uint8_t ble_beacon_res_num = 0;
@@ -74,6 +77,9 @@ uint8_t ble_beacon_rssi_array[BLE_BEACON_BUF_MAX] = { 0 };
 uint8_t ble_uuid_filter_array[16] = { 0 };
 uint8_t ble_uuid_filter_num = 0;
 static bool s_ble_scanning = false;                                                     /**< Internal flag tracking if a BLE scan is active */
+static uint16_t s_ble_ibeacon_seen = 0;
+static uint16_t s_ble_approved_reports = 0;
+static uint8_t s_ble_rejected_uuid_logs = 0;
 
 BLE_NUS_DEF(m_nus, NRF_SDH_BLE_TOTAL_LINK_COUNT);
 
@@ -101,7 +107,9 @@ static ble_uuid_t m_adv_uuids[] =
 static void advertising_start( void * p_erase_bonds );
 static void send_data_to_ble( uint8_t* buffer,uint16_t length );
 static bool buf_cmp_value( uint8_t *a, uint8_t *b, uint8_t len );
-static bool beacon_uuid_filter( uint8_t *uuid );
+static bool beacon_uuid_approved( const uint8_t *uuid );
+static void ble_uuid_to_hex( const uint8_t *uuid, char *out, uint8_t out_len );
+static void ble_mac_to_hex( const uint8_t *mac, char *out, uint8_t out_len );
 
 
 /**@brief Function for assert macro callback.
@@ -397,12 +405,24 @@ static void ble_evt_handler( ble_evt_t const * p_ble_evt, void * p_context )
                         if( beacon_data_len == BEACON_DATA_LEN )
                         {
                             s_filter_flag = true;
-                            // HAL_DBG_TRACE_PRINTF( "iBeacon: " );
-                            // for( uint8_t i = 0; i < beacon_data_len; i++ )
-                            // HAL_DBG_TRACE_PRINTF( "%02x ", p_data[i] );
-                            // HAL_DBG_TRACE_PRINTF( "\r\n" );
+                            s_ble_ibeacon_seen++;
 
-                            if( beacon_uuid_filter(( uint8_t * )p_data + 4 ) == false ) return;
+                            if( beacon_uuid_approved(( uint8_t * )p_data + 4 ) == false )
+                            {
+                                if( s_ble_rejected_uuid_logs < BLE_SCAN_DEBUG_REJECT_LOG_MAX )
+                                {
+                                    char uuid_str[33];
+                                    char mac_str[18];
+                                    ble_uuid_to_hex( p_data + 4, uuid_str, sizeof( uuid_str ));
+                                    ble_mac_to_hex( p_gap_evt->params.adv_report.peer_addr.addr, mac_str, sizeof( mac_str ));
+                                    LOG_BLE( "iBeacon rejected UUID=%s mac=%s rssi=%d dBm\n",
+                                             uuid_str, mac_str, p_gap_evt->params.adv_report.rssi );
+                                    s_ble_rejected_uuid_logs++;
+                                }
+                                return;
+                            }
+
+                            s_ble_approved_reports++;
 
                             bool res0 = true, res1 = true, res2 = true, res3 = true, res4 = true, res5 = true;
                             for( uint8_t j = 0; j < BLE_BEACON_BUF_MAX; j++ )
@@ -429,6 +449,17 @@ static void ble_evt_handler( ble_evt_t const * p_ble_evt, void * p_context )
                                     memcpy(( uint8_t *)( &ble_beacon_buf[ble_beacon_res_num].rssi ), p_data + 24, 1 );
                                     memcpy(( uint8_t *)( &ble_beacon_buf[ble_beacon_res_num].rssi_ ), ( uint8_t *)( &p_gap_evt->params.adv_report.rssi ), 1 );
                                     memcpy(( uint8_t *)( &ble_beacon_buf[ble_beacon_res_num].mac ), ( uint8_t *)( p_gap_evt->params.adv_report.peer_addr.addr ), 6 );
+                                    uint16_t major = 0, minor = 0;
+                                    char uuid_str[33];
+                                    char mac_str[18];
+                                    memcpyr(( uint8_t *)( &major ), ( uint8_t *)( &ble_beacon_buf[ble_beacon_res_num].major ), 2 );
+                                    memcpyr(( uint8_t *)( &minor ), ( uint8_t *)( &ble_beacon_buf[ble_beacon_res_num].minor ), 2 );
+                                    ble_uuid_to_hex( ble_beacon_buf[ble_beacon_res_num].uuid, uuid_str, sizeof( uuid_str ));
+                                    ble_mac_to_hex( ble_beacon_buf[ble_beacon_res_num].mac, mac_str, sizeof( mac_str ));
+                                    LOG_BLE( "iBeacon approved #%u UUID=%s major=%u minor=%u tx=%d dBm rssi=%d dBm mac=%s\n",
+                                             ble_beacon_res_num + 1, uuid_str, major, minor,
+                                             ble_beacon_buf[ble_beacon_res_num].rssi,
+                                             ble_beacon_buf[ble_beacon_res_num].rssi_, mac_str );
                                     ble_beacon_res_num ++;
                                     break;
                                 }   
@@ -575,23 +606,60 @@ static bool buf_cmp_value( uint8_t *a, uint8_t *b, uint8_t len )
     return true;
 }
 
-static bool beacon_uuid_filter( uint8_t *uuid )
+static void ble_uuid_to_hex( const uint8_t *uuid, char *out, uint8_t out_len )
 {
-    char filter_str[36] = { 0 }, raw_str[36] = { 0 };
-    
-    if( ble_uuid_filter_num == 0 ) return true; // not use uuid filter
-    
-    for( uint8_t i = 0; i < 16; i++ )
+    if(( uuid == NULL ) || ( out == NULL ) || ( out_len < 33 ))
     {
-        sprintf( raw_str + i * 2, "%02X", uuid[i] );
-    }
-    for( uint8_t i = 0; i < ble_uuid_filter_num; i++ )
-    {
-        sprintf( filter_str + i * 2, "%02X", ble_uuid_filter_array[i] );
+        return;
     }
 
-    if( strstr( raw_str, filter_str )) return true;
-    else return false;
+    for( uint8_t i = 0; i < 16; i++ )
+    {
+        snprintf( out + ( i * 2 ), out_len - ( i * 2 ), "%02X", uuid[i] );
+    }
+    out[32] = '\0';
+}
+
+static void ble_mac_to_hex( const uint8_t *mac, char *out, uint8_t out_len )
+{
+    if(( mac == NULL ) || ( out == NULL ) || ( out_len < 18 ))
+    {
+        return;
+    }
+
+    snprintf( out, out_len, "%02X:%02X:%02X:%02X:%02X:%02X",
+              mac[5], mac[4], mac[3], mac[2], mac[1], mac[0] );
+}
+
+static bool beacon_uuid_approved( const uint8_t *uuid )
+{
+    bool have_whitelist = false;
+
+#if CREW_DR_BLE_UUID_WHITELIST_ENABLE
+    for( uint8_t i = 0; i < CREW_DR_BLE_UUID_WHITELIST_COUNT; i++ )
+    {
+        have_whitelist = true;
+        if( memcmp( uuid, CREW_DR_BLE_UUID_WHITELIST[i], 16 ) == 0 )
+        {
+            return true;
+        }
+    }
+#endif
+
+    /*
+     * The config app field is now an extra approved UUID, not the only filter.
+     * Require a full 16-byte UUID here so a short/prefix value cannot accidentally approve unrelated beacons.
+     */
+    if( ble_uuid_filter_num == 16 )
+    {
+        have_whitelist = true;
+        if( memcmp( uuid, ble_uuid_filter_array, 16 ) == 0 )
+        {
+            return true;
+        }
+    }
+
+    return have_whitelist == false;
 }
 
 bool ble_scan_start( void )
@@ -603,6 +671,9 @@ bool ble_scan_start( void )
         memset(( uint8_t *)( &ble_beacon_buf[i] ), 0, sizeof( BleBeacons_t ));    
     }
     ble_beacon_res_num = 0;
+    s_ble_ibeacon_seen = 0;
+    s_ble_approved_reports = 0;
+    s_ble_rejected_uuid_logs = 0;
 
     err_code = nrf_ble_scan_params_set( &m_scan, &m_scan_param );
     APP_ERROR_CHECK( err_code );
@@ -611,8 +682,13 @@ bool ble_scan_start( void )
     APP_ERROR_CHECK( err_code );
 
     s_ble_scanning = true;
-    HAL_DBG_TRACE_PRINTF( "BLE scan START (interval=%u, window=%u, duration=%u)\r\n",
-                          (unsigned) APP_SCAN_INTERVAL, (unsigned) APP_SCAN_WINDOW, (unsigned) APP_SCAN_DURATION );
+    LOG_BLE( "scan START interval=%u window=%u duration=%u default_uuids=%u extra_uuid=%s\n",
+             (unsigned) APP_SCAN_INTERVAL, (unsigned) APP_SCAN_WINDOW, (unsigned) APP_SCAN_DURATION,
+             (unsigned) CREW_DR_BLE_UUID_WHITELIST_COUNT, ( ble_uuid_filter_num == 16 ) ? "yes" : "no" );
+    if(( ble_uuid_filter_num != 0 ) && ( ble_uuid_filter_num != 16 ))
+    {
+        LOG_BLE( "extra UUID ignored: app value is %u byte(s), expected 16\n", ble_uuid_filter_num );
+    }
 
     return true;
 }
@@ -676,38 +752,159 @@ bool ble_get_results( uint8_t *result, uint8_t *size )
     return false;
 }
 
+static bool ble_have_approved_uuid_source( void )
+{
+    bool have_approved_uuid_source = false;
+
+    /*
+     * DR hints must come from an explicitly approved UUID source. That source can be the build-time
+     * whitelist or the config app's extra UUID. Do not require the app UUID when the default whitelist
+     * has already approved the beacon; otherwise production beacons would be logged but ignored.
+     */
+#if CREW_DR_BLE_UUID_WHITELIST_ENABLE
+    have_approved_uuid_source = ( CREW_DR_BLE_UUID_WHITELIST_COUNT > 0 );
+#endif
+    have_approved_uuid_source = have_approved_uuid_source || ( ble_uuid_filter_num == 16 );
+    return have_approved_uuid_source;
+}
+
+static void ble_copy_hint_from_index( ble_beacon_hint_t *hint, uint8_t index )
+{
+    memset( hint, 0, sizeof( *hint ));
+    memcpy( hint->uuid, ble_beacon_buf[index].uuid, sizeof( hint->uuid ));
+    memcpyr(( uint8_t *)( &hint->major ), ( uint8_t *)( &ble_beacon_buf[index].major ), 2 );
+    memcpyr(( uint8_t *)( &hint->minor ), ( uint8_t *)( &ble_beacon_buf[index].minor ), 2 );
+    memcpy( hint->mac, ble_beacon_buf[index].mac, sizeof( hint->mac ));
+    hint->rssi = ble_beacon_buf[index].rssi_;
+}
+
+bool ble_get_strongest_approved_beacon( ble_beacon_hint_t *hint )
+{
+    int8_t best_rssi = -128;
+    int8_t best_index = -1;
+
+    if( hint == NULL )
+    {
+        return false;
+    }
+
+    if( ble_have_approved_uuid_source( ) == false )
+    {
+        LOG_BLE( "BLE movement hint: disabled because no approved UUID source is configured\n" );
+        return false;
+    }
+
+    for( uint8_t i = 0; i < ble_beacon_res_num; i++ )
+    {
+        if(( best_index < 0 ) || ( ble_beacon_buf[i].rssi_ > best_rssi ))
+        {
+            best_index = i;
+            best_rssi = ble_beacon_buf[i].rssi_;
+        }
+    }
+
+    if( best_index < 0 )
+    {
+        return false;
+    }
+
+    ble_copy_hint_from_index( hint, best_index );
+
+    char uuid_str[33];
+    char mac_str[18];
+    ble_uuid_to_hex( hint->uuid, uuid_str, sizeof( uuid_str ));
+    ble_mac_to_hex( hint->mac, mac_str, sizeof( mac_str ));
+    LOG_BLE( "Movement hint: strongest approved UUID=%s major=%u minor=%u rssi=%d dBm mac=%s\n",
+             uuid_str, hint->major, hint->minor, hint->rssi, mac_str );
+
+    return true;
+}
+
+bool ble_get_strongest_hint( ble_beacon_hint_t *hint )
+{
+    int8_t best_rssi = -128;
+    int8_t best_index = -1;
+    uint8_t invalid_minor_count = 0;
+
+    if( hint == NULL )
+    {
+        return false;
+    }
+
+    if( ble_have_approved_uuid_source( ) == false )
+    {
+        LOG_BLE( "DR hint: disabled because no approved UUID source is configured\n" );
+        return false;
+    }
+
+    /*
+     * The scanner has already applied the approved UUID filter. For DR hints, only accept explicit
+     * commissioning values 1..5 and ignore factory/default Minors such as 19641.
+     */
+    for( uint8_t i = 0; i < ble_beacon_res_num; i++ )
+    {
+        uint16_t minor = 0;
+        memcpyr(( uint8_t *)( &minor ), ( uint8_t *)( &ble_beacon_buf[i].minor ), 2 );
+
+        if(( minor < 1 ) || ( minor > 5 ))
+        {
+            invalid_minor_count++;
+            continue;
+        }
+
+        if(( best_index < 0 ) || ( ble_beacon_buf[i].rssi_ > best_rssi ))
+        {
+            best_index = i;
+            best_rssi = ble_beacon_buf[i].rssi_;
+        }
+    }
+
+    if( best_index < 0 )
+    {
+        LOG_BLE( "DR hint: no usable Minor 1..5 found among %u approved beacon(s), invalid_minor=%u\n",
+                 ble_beacon_res_num, invalid_minor_count );
+        return false;
+    }
+
+    ble_copy_hint_from_index( hint, best_index );
+
+    char uuid_str[33];
+    char mac_str[18];
+    ble_uuid_to_hex( hint->uuid, uuid_str, sizeof( uuid_str ));
+    ble_mac_to_hex( hint->mac, mac_str, sizeof( mac_str ));
+    LOG_BLE( "DR hint: strongest UUID=%s major=%u minor=%u rssi=%d dBm mac=%s\n",
+             uuid_str, hint->major, hint->minor, hint->rssi, mac_str );
+
+    return true;
+}
+
 void ble_scan_stop( void )
 {
     nrf_ble_scan_stop( );
     s_ble_scanning = false;
-    HAL_DBG_TRACE_PRINTF( "BLE scan STOP\r\n" );
+    LOG_BLE( "scan STOP iBeacon_reports=%u approved_reports=%u unique_approved=%u rejected_uuid_logs=%u\n",
+             s_ble_ibeacon_seen, s_ble_approved_reports, ble_beacon_res_num, s_ble_rejected_uuid_logs );
 }
 
 void ble_display_results( void )
 {
-    HAL_DBG_TRACE_PRINTF( "iBeacon: %d\r\n", ble_beacon_res_num );
+    LOG_BLE( "iBeacon unique approved: %d\r\n", ble_beacon_res_num );
     for( uint8_t i = 0; i < ble_beacon_res_num; i ++ )
     {
-        HAL_DBG_TRACE_PRINTF("%04x, ", ble_beacon_buf[ble_beacon_rssi_array[i]].company_id );
-        for( uint8_t j = 0; j < 16; j++ )
-        {
-            HAL_DBG_TRACE_PRINTF( "%02x ", ble_beacon_buf[ble_beacon_rssi_array[i]].uuid[j] );
-        }
-
         uint16_t major = 0, minor = 0;
+        char uuid_str[33];
+        char mac_str[18];
         memcpyr(( uint8_t *)( &major ), ( uint8_t *)( &ble_beacon_buf[ble_beacon_rssi_array[i]].major ), 2 );
         memcpyr(( uint8_t *)( &minor ), ( uint8_t *)( &ble_beacon_buf[ble_beacon_rssi_array[i]].minor ), 2 );
-        HAL_DBG_TRACE_PRINTF(", %d, \t", major );
-        HAL_DBG_TRACE_PRINTF("%d, \t", minor );
-        HAL_DBG_TRACE_PRINTF("%d/%d dBm, ", ble_beacon_buf[ble_beacon_rssi_array[i]].rssi, ble_beacon_buf[ble_beacon_rssi_array[i]].rssi_ );
-
-        for( uint8_t j = 0; j < 5; j++ )
-        {
-            HAL_DBG_TRACE_PRINTF( "%02x:", ble_beacon_buf[ble_beacon_rssi_array[i]].mac[5 - j] );
-        }
-        HAL_DBG_TRACE_PRINTF( "%02x\r\n", ble_beacon_buf[ble_beacon_rssi_array[i]].mac[0] );
+        ble_uuid_to_hex( ble_beacon_buf[ble_beacon_rssi_array[i]].uuid, uuid_str, sizeof( uuid_str ));
+        ble_mac_to_hex( ble_beacon_buf[ble_beacon_rssi_array[i]].mac, mac_str, sizeof( mac_str ));
+        LOG_BLE( "  #%u company=0x%04x UUID=%s major=%u minor=%u tx=%d dBm rssi=%d dBm mac=%s\r\n",
+                 i + 1, ble_beacon_buf[ble_beacon_rssi_array[i]].company_id,
+                 uuid_str, major, minor,
+                 ble_beacon_buf[ble_beacon_rssi_array[i]].rssi,
+                 ble_beacon_buf[ble_beacon_rssi_array[i]].rssi_, mac_str );
     }
-    HAL_DBG_TRACE_PRINTF( "\n" );
+    LOG_BLE( "\n" );
 }
 
 bool ble_scan_is_active( void )

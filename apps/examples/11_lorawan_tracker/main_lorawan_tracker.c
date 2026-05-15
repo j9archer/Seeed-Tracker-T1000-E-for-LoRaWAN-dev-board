@@ -10,6 +10,8 @@
 #include "apps_modem_common.h"
 #include "apps_modem_event.h"
 #include "smtc_modem_api.h"
+#include "smtc_modem_middleware_advanced_api.h"
+#include "smtc_modem_hal.h"
 #include "device_management_defs.h"
 #include "smtc_board_ralf.h"
 #include "apps_utilities.h"
@@ -27,10 +29,13 @@
 #include "app_led.h"
 #include "app_beep.h"
 #include "app_timer.h"
+#include "crew_dr_strategy_config.h"
+#include "main_lorawan_tracker_api.h"
 #include "wifi_scan.h"
 #include "gateway_assistance.h"
 #include "marine_gnss.h"
 #include "firmware_version.h"
+#include "log_filter.h"
 
 /*
  * -----------------------------------------------------------------------------
@@ -42,10 +47,61 @@
  * --- PRIVATE CONSTANTS -------------------------------------------------------
  */
 
+#define CREW_MOB_APP_PORT           2
+#define CREW_DR_PROFILE_LEN         16
+#define CREW_HP_CHANNEL_ENABLE      false
+#define CREW_HP_CHANNEL_FREQ_HZ     869525000
+#define CREW_HP_CHANNEL_DR          3
+
 /*
  * -----------------------------------------------------------------------------
  * --- PRIVATE TYPES -----------------------------------------------------------
  */
+
+typedef struct
+{
+    uint8_t region_min;
+    uint8_t region_max;
+    uint8_t normal;
+    uint8_t persistence;
+    uint8_t minimum;
+    uint8_t sos_low;
+    uint8_t vessel_current;
+} crew_dr_config_t;
+
+typedef enum
+{
+    CREW_DR_PROFILE_NONE = 0,
+    CREW_DR_PROFILE_EXCELLENT = 1,
+    CREW_DR_PROFILE_GOOD = 2,
+    CREW_DR_PROFILE_MEDIUM = 3,
+    CREW_DR_PROFILE_WEAK = 4,
+    CREW_DR_PROFILE_POOR = 5,
+} crew_dr_beacon_profile_t;
+
+typedef struct
+{
+    bool active;
+    uint8_t profile;
+    uint8_t pending_upgrade_profile;
+    uint8_t pending_upgrade_count;
+    uint8_t pending_movement_profile;
+    uint8_t pending_movement_count;
+    uint16_t pending_movement_major;
+    uint16_t pending_movement_minor;
+    int8_t pending_movement_rssi;
+    uint8_t pending_movement_uuid[16];
+    uint8_t pending_movement_mac[8];
+    uint16_t major;
+    uint16_t minor;
+    int8_t rssi;
+    uint8_t uuid[16];
+    uint8_t mac[8];
+    uint32_t stable_since_s;
+    uint32_t last_forced_linkcheck_s;
+    bool linkcheck_sent_for_profile;
+    bool linkcheck_refined_dr;
+} crew_ble_hint_state_t;
 
 /*
  * -----------------------------------------------------------------------------
@@ -104,6 +160,17 @@ bool adr_user_enable = true;
 uint8_t adr_user_dr_min = 0;
 uint8_t adr_user_dr_max = 0;
 uint8_t adr_custom_list_region[16] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+
+static crew_dr_config_t crew_dr = { 0 };
+static bool crew_dr_ready = false;
+static uint8_t crew_linkcheck_good_streak = 0;
+static uint16_t crew_uplinks_since_linkcheck = 0;
+static bool crew_linkcheck_pending = false;
+static crew_ble_hint_state_t crew_ble_hint = { 0 };
+static uint32_t mob_phase3_uplink_count = 0;
+/* Extended uplink tasks keep only a payload pointer, so burst payloads need stable storage until the modem runs them. */
+static uint8_t crew_burst_ext_payload[2][LORAWAN_APP_DATA_MAX_SIZE];
+static uint8_t crew_burst_ext_len[2] = { 0, 0 };
 
 uint8_t packet_policy = RETRY_STATE_1N;
 
@@ -202,6 +269,22 @@ static void on_modem_down_data( int8_t rssi, int8_t snr, smtc_modem_event_downda
  * @brief 
  */
 static void app_tracker_scan_process( void );
+static bool app_send_frame_on_port( uint8_t port, const uint8_t* buffer, const uint8_t length, bool tx_confirmed,
+                                    bool emergency );
+static bool app_send_frame_on_port_ext( uint8_t port, const uint8_t* buffer, const uint8_t length, bool tx_confirmed,
+                                        bool emergency, uint8_t extended_id );
+static bool crew_send_dr_burst_on_port( uint8_t port, const uint8_t* buffer, const uint8_t length, bool tx_confirmed,
+                                        bool emergency );
+static void crew_dr_configure_for_region( smtc_modem_region_t region );
+static bool crew_dr_apply_fixed( uint8_t dr );
+static bool crew_dr_prepare_next_uplink( uint8_t dr );
+static uint8_t crew_dr_for_mob_policy( app_mob_dr_policy_t policy );
+static uint8_t crew_dr_for_ble_profile( uint8_t profile );
+static void crew_dr_handle_ble_hint_scan( void );
+static void crew_dr_handle_link_status( smtc_modem_event_link_check_status_t status, uint8_t margin, uint8_t gw_cnt );
+static void crew_dr_after_vessel_uplink( bool send_ok );
+static bool crew_dr_request_linkcheck( const char* reason );
+static void crew_extended_uplink_done( void );
 
 /*!
  * @}
@@ -224,7 +307,7 @@ int main( void )
         .down_data             = on_modem_down_data,
         .join_fail             = NULL,
         .joined                = on_modem_network_joined,
-        .link_status           = NULL,
+        .link_status           = crew_dr_handle_link_status,
         .mute                  = NULL,
         .new_link_adr          = NULL,
         .reset                 = on_modem_reset,
@@ -376,6 +459,580 @@ static void custom_lora_adr_compute( uint8_t min, uint8_t max, uint8_t *buf )
             offset += 1;
         }
     }
+}
+
+static bool crew_get_region_dr_bounds( smtc_modem_region_t region, uint8_t *min_dr, uint8_t *max_dr )
+{
+    switch( region )
+    {
+        case SMTC_MODEM_REGION_EU_868:
+            *min_dr = LORAWAN_EU868_DR_MIN;
+            *max_dr = LORAWAN_EU868_DR_MAX;
+        break;
+
+        case SMTC_MODEM_REGION_US_915:
+            *min_dr = LORAWAN_US915_DR_MIN;
+            *max_dr = LORAWAN_US915_DR_MAX;
+        break;
+
+        case SMTC_MODEM_REGION_AU_915:
+            *min_dr = LORAWAN_AU915_DR_MIN;
+            *max_dr = LORAWAN_AU915_DR_MAX;
+        break;
+
+        case SMTC_MODEM_REGION_AS_923_GRP1:
+        case SMTC_MODEM_REGION_AS_923_GRP2:
+        case SMTC_MODEM_REGION_AS_923_GRP3:
+        case SMTC_MODEM_REGION_AS_923_GRP4:
+        case SMTC_MODEM_REGION_AS_923_HELIUM_1:
+        case SMTC_MODEM_REGION_AS_923_HELIUM_2:
+        case SMTC_MODEM_REGION_AS_923_HELIUM_3:
+        case SMTC_MODEM_REGION_AS_923_HELIUM_4:
+        case SMTC_MODEM_REGION_AS_923_HELIUM_1B:
+            *min_dr = LORAWAN_AS923_DR_MIN;
+            *max_dr = LORAWAN_AS923_DR_MAX;
+        break;
+
+        case SMTC_MODEM_REGION_KR_920:
+            *min_dr = LORAWAN_KR920_DR_MIN;
+            *max_dr = LORAWAN_KR920_DR_MAX;
+        break;
+
+        case SMTC_MODEM_REGION_IN_865:
+            *min_dr = LORAWAN_IN865_DR_MIN;
+            *max_dr = LORAWAN_IN865_DR_MAX;
+        break;
+
+        case SMTC_MODEM_REGION_RU_864:
+            *min_dr = LORAWAN_RU864_DR_MIN;
+            *max_dr = LORAWAN_RU864_DR_MAX;
+        break;
+
+        default:
+            return false;
+    }
+
+    return true;
+}
+
+static uint8_t crew_clamp_dr( uint8_t dr, uint8_t min_dr, uint8_t max_dr )
+{
+    if( dr < min_dr )
+    {
+        return min_dr;
+    }
+    if( dr > max_dr )
+    {
+        return max_dr;
+    }
+    return dr;
+}
+
+static void crew_dr_configure_for_region( smtc_modem_region_t region )
+{
+    uint8_t region_min = 0;
+    uint8_t region_max = 0;
+
+    if( crew_get_region_dr_bounds( region, &region_min, &region_max ) == false )
+    {
+        HAL_DBG_TRACE_WARNING( "Crew DR strategy disabled: unsupported region\n" );
+        crew_dr_ready = false;
+        return;
+    }
+
+    bool user_range_valid = ( adr_user_dr_min >= region_min ) && ( adr_user_dr_max <= region_max ) &&
+                            ( adr_user_dr_min <= adr_user_dr_max );
+
+    /*
+     * Crew tags run with a mission-oriented DR policy instead of ADR.
+     * All selected DRs are clamped to the configured lr_DR_min/lr_DR_max window per MDR-012.
+     * If the BT app has not provided a valid lr_DR_min/lr_DR_max window, use the region bounds.
+     */
+    crew_dr.region_min = region_min;
+    crew_dr.region_max = region_max;
+    crew_dr.minimum = user_range_valid ? adr_user_dr_min : region_min;
+    crew_dr.normal = user_range_valid ? adr_user_dr_max : region_max;
+    crew_dr.persistence = ( crew_dr.normal > 2 ) ? ( crew_dr.normal - 2 ) : crew_dr.minimum;
+    crew_dr.persistence = crew_clamp_dr( crew_dr.persistence, crew_dr.minimum, crew_dr.normal );
+    crew_dr.sos_low = crew_dr.minimum;
+    crew_dr.vessel_current = crew_dr.normal;
+    crew_linkcheck_good_streak = 0;
+    crew_uplinks_since_linkcheck = 0;
+    crew_linkcheck_pending = false;
+    memset( &crew_ble_hint, 0, sizeof( crew_ble_hint ));
+    mob_phase3_uplink_count = 0;
+    crew_dr_ready = true;
+
+    LOG_LORA( "Crew DR strategy: minimum=%u normal=%u persistence=%u sos_low=%u\n",
+              crew_dr.minimum, crew_dr.normal, crew_dr.persistence, crew_dr.sos_low );
+}
+
+static bool crew_dr_apply_fixed( uint8_t dr )
+{
+    uint8_t fixed_dr[CREW_DR_PROFILE_LEN];
+
+    if( crew_dr_ready == false )
+    {
+        return false;
+    }
+
+    dr = crew_clamp_dr( dr, crew_dr.minimum, crew_dr.normal );
+    memset( fixed_dr, dr, sizeof( fixed_dr ));
+
+    if( smtc_modem_adr_set_profile( stack_id, SMTC_MODEM_ADR_PROFILE_CUSTOM, fixed_dr ) != SMTC_MODEM_RC_OK )
+    {
+        LOG_LORA( "WARN: Failed to apply fixed DR%u\n", dr );
+        return false;
+    }
+
+    return true;
+}
+
+static bool crew_dr_prepare_next_uplink( uint8_t dr )
+{
+    uint8_t applied_dr = crew_clamp_dr( dr, crew_dr.minimum, crew_dr.normal );
+
+    /*
+     * The ADR profile sets the live modem DR. The per-task tag below preserves that DR
+     * for queued SEND_TASK_EXTENDED packets, otherwise later burst entries could overwrite it.
+     */
+    if( crew_dr_apply_fixed( applied_dr ) == false )
+    {
+        return false;
+    }
+
+    if( smtc_modem_set_next_uplink_datarate( stack_id, applied_dr ) != SMTC_MODEM_RC_OK )
+    {
+        LOG_LORA( "WARN: Failed to tag next uplink for DR%u\n", applied_dr );
+        return false;
+    }
+
+    return true;
+}
+
+static uint8_t crew_dr_for_mob_policy( app_mob_dr_policy_t policy )
+{
+    if( crew_dr_ready == false )
+    {
+        return 0;
+    }
+
+    switch( policy )
+    {
+        case APP_MOB_DR_MAX:
+            return crew_dr.normal;
+
+        case APP_MOB_DR_MINIMUM:
+            return crew_dr.sos_low;
+
+        case APP_MOB_DR_PHASE3_ALTERNATING:
+            /* Phase 3 keeps 90% of traffic at persistence DR and probes minimum DR every 10th uplink. */
+            mob_phase3_uplink_count++;
+            return ( ( mob_phase3_uplink_count % 10 ) == 0 ) ? crew_dr.sos_low : crew_dr.persistence;
+
+        case APP_MOB_DR_PERSISTENCE:
+        default:
+            return crew_dr.persistence;
+    }
+}
+
+static uint8_t crew_dr_for_ble_profile( uint8_t profile )
+{
+    /*
+     * Beacon installers set iBeacon Minor to a simple RF grade, not a raw LoRa metric.
+     * 1/2 keep airtime low, 3/4 use the vessel persistence DR, and 5 selects SOS-low/minimum-safe DR.
+     */
+    switch( profile )
+    {
+        case CREW_DR_PROFILE_EXCELLENT:
+        case CREW_DR_PROFILE_GOOD:
+            return crew_dr.normal;
+
+        case CREW_DR_PROFILE_MEDIUM:
+        case CREW_DR_PROFILE_WEAK:
+            return crew_dr.persistence;
+
+        case CREW_DR_PROFILE_POOR:
+            return crew_dr.sos_low;
+
+        case CREW_DR_PROFILE_NONE:
+        default:
+            return crew_dr.vessel_current;
+    }
+}
+
+static bool crew_dr_accept_ble_profile( const ble_beacon_hint_t *hint, uint8_t profile )
+{
+    if( crew_dr_ready == false )
+    {
+        return false;
+    }
+
+    uint8_t new_dr = crew_dr_for_ble_profile( profile );
+    bool beacon_changed = ( crew_ble_hint.active == false ) || ( crew_ble_hint.profile != profile ) ||
+                          ( crew_ble_hint.major != hint->major ) || ( crew_ble_hint.minor != hint->minor ) ||
+                          ( memcmp( crew_ble_hint.uuid, hint->uuid, sizeof( crew_ble_hint.uuid )) != 0 ) ||
+                          ( memcmp( crew_ble_hint.mac, hint->mac, sizeof( crew_ble_hint.mac )) != 0 );
+
+    crew_ble_hint.active = true;
+    crew_ble_hint.profile = profile;
+    crew_ble_hint.pending_upgrade_profile = CREW_DR_PROFILE_NONE;
+    crew_ble_hint.pending_upgrade_count = 0;
+    crew_ble_hint.pending_movement_profile = CREW_DR_PROFILE_NONE;
+    crew_ble_hint.pending_movement_count = 0;
+    crew_ble_hint.major = hint->major;
+    crew_ble_hint.minor = hint->minor;
+    crew_ble_hint.rssi = hint->rssi;
+    memcpy( crew_ble_hint.uuid, hint->uuid, sizeof( crew_ble_hint.uuid ));
+    memcpy( crew_ble_hint.mac, hint->mac, sizeof( crew_ble_hint.mac ));
+
+    if( beacon_changed )
+    {
+        crew_ble_hint.stable_since_s = hal_rtc_get_time_s( );
+        crew_ble_hint.linkcheck_sent_for_profile = false;
+        crew_ble_hint.linkcheck_refined_dr = false;
+        crew_linkcheck_good_streak = 0;
+    }
+
+    /*
+     * BLE hints set the vessel baseline quickly when the wearer enters a new RF zone.
+     * LinkCheck may later fine tune the baseline, but the local hint is the immediate movement signal.
+     */
+    if( beacon_changed || (( crew_ble_hint.linkcheck_refined_dr == false ) && ( new_dr < crew_dr.vessel_current )))
+    {
+        crew_dr.vessel_current = new_dr;
+        crew_dr_apply_fixed( crew_dr.vessel_current );
+        LOG_LORA( "Crew BLE hint accepted: major=%u minor=%u profile=%u rssi=%d DR%u\n",
+                  hint->major, hint->minor, profile, hint->rssi, crew_dr.vessel_current );
+    }
+    else if(( crew_ble_hint.linkcheck_refined_dr ) && ( new_dr < crew_dr.vessel_current ))
+    {
+        LOG_LORA( "Crew BLE hint held: major=%u minor=%u suggests DR%u, LinkCheck keeps DR%u\n",
+                  hint->major, hint->minor, new_dr, crew_dr.vessel_current );
+    }
+
+    return true;
+}
+
+static bool crew_ble_hint_matches_current( const ble_beacon_hint_t *hint, uint8_t profile )
+{
+    return ( crew_ble_hint.active ) && ( crew_ble_hint.profile == profile ) &&
+           ( crew_ble_hint.major == hint->major ) && ( crew_ble_hint.minor == hint->minor ) &&
+           ( memcmp( crew_ble_hint.uuid, hint->uuid, sizeof( crew_ble_hint.uuid )) == 0 ) &&
+           ( memcmp( crew_ble_hint.mac, hint->mac, sizeof( crew_ble_hint.mac )) == 0 );
+}
+
+static bool crew_ble_hint_minor_is_dr_profile( uint16_t minor )
+{
+    return ( minor >= CREW_DR_PROFILE_EXCELLENT ) && ( minor <= CREW_DR_PROFILE_POOR );
+}
+
+static bool crew_ble_hint_confirm_movement( const ble_beacon_hint_t *hint, uint8_t profile )
+{
+    bool same_pending = ( crew_ble_hint.pending_movement_profile == profile ) &&
+                        ( crew_ble_hint.pending_movement_major == hint->major ) &&
+                        ( crew_ble_hint.pending_movement_minor == hint->minor ) &&
+                        ( memcmp( crew_ble_hint.pending_movement_uuid, hint->uuid,
+                                  sizeof( crew_ble_hint.pending_movement_uuid )) == 0 ) &&
+                        ( memcmp( crew_ble_hint.pending_movement_mac, hint->mac,
+                                  sizeof( crew_ble_hint.pending_movement_mac )) == 0 );
+
+    /*
+     * The T1000-E only samples BLE once before each uplink, so movement hysteresis is based on
+     * repeated scan sessions, not advertisement counts inside one scan. A one-off strongest-beacon
+     * flip is treated as RSSI noise and must repeat before it can reset the BLE DR baseline.
+     */
+    if( same_pending )
+    {
+        if( crew_ble_hint.pending_movement_count < CREW_DR_BLE_HINT_MOVEMENT_CONFIRM_SCANS )
+        {
+            crew_ble_hint.pending_movement_count++;
+        }
+    }
+    else
+    {
+        crew_ble_hint.pending_movement_profile = profile;
+        crew_ble_hint.pending_movement_count = 1;
+        crew_ble_hint.pending_movement_major = hint->major;
+        crew_ble_hint.pending_movement_minor = hint->minor;
+        crew_ble_hint.pending_movement_rssi = hint->rssi;
+        memcpy( crew_ble_hint.pending_movement_uuid, hint->uuid, sizeof( crew_ble_hint.pending_movement_uuid ));
+        memcpy( crew_ble_hint.pending_movement_mac, hint->mac, sizeof( crew_ble_hint.pending_movement_mac ));
+    }
+
+    if( crew_ble_hint.pending_movement_count >= CREW_DR_BLE_HINT_MOVEMENT_CONFIRM_SCANS )
+    {
+        return true;
+    }
+
+    LOG_LORA( "Crew BLE movement pending: major=%u minor=%u profile=%u rssi=%d count=%u/%u\n",
+              hint->major, hint->minor, profile, hint->rssi, crew_ble_hint.pending_movement_count,
+              CREW_DR_BLE_HINT_MOVEMENT_CONFIRM_SCANS );
+    return false;
+}
+
+static void crew_ble_accept_movement_only( const ble_beacon_hint_t *hint, uint8_t profile )
+{
+    /*
+     * Approved UUIDs are useful movement/location signals even when Minor has not been commissioned
+     * as a DR hint. Update stability state so LinkCheck can run after the wearer stops moving, but
+     * leave the current DR unchanged until a valid Minor 1..5 hint or LinkCheckAns changes it.
+     */
+    crew_ble_hint.active = true;
+    crew_ble_hint.profile = profile;
+    crew_ble_hint.pending_upgrade_profile = CREW_DR_PROFILE_NONE;
+    crew_ble_hint.pending_upgrade_count = 0;
+    crew_ble_hint.pending_movement_profile = CREW_DR_PROFILE_NONE;
+    crew_ble_hint.pending_movement_count = 0;
+    crew_ble_hint.major = hint->major;
+    crew_ble_hint.minor = hint->minor;
+    crew_ble_hint.rssi = hint->rssi;
+    memcpy( crew_ble_hint.uuid, hint->uuid, sizeof( crew_ble_hint.uuid ));
+    memcpy( crew_ble_hint.mac, hint->mac, sizeof( crew_ble_hint.mac ));
+    crew_ble_hint.stable_since_s = hal_rtc_get_time_s( );
+    crew_ble_hint.linkcheck_sent_for_profile = false;
+    crew_ble_hint.linkcheck_refined_dr = false;
+    crew_linkcheck_good_streak = 0;
+
+    LOG_LORA( "Crew BLE movement accepted: major=%u minor=%u profile=%u rssi=%d, keep DR%u\n",
+              hint->major, hint->minor, profile, hint->rssi, crew_dr.vessel_current );
+}
+
+static void crew_dr_handle_ble_hint_scan( void )
+{
+#if CREW_DR_BLE_HINT_ENABLE
+    ble_beacon_hint_t movement_hint;
+    ble_beacon_hint_t dr_hint;
+
+    if( crew_dr_ready == false )
+    {
+        return;
+    }
+
+    if( ble_get_strongest_approved_beacon( &movement_hint ) == false )
+    {
+        if( crew_ble_hint.active )
+        {
+            LOG_LORA( "Crew BLE movement hint lost; continuing at DR%u until LinkCheck updates baseline\n",
+                      crew_dr.vessel_current );
+        }
+        memset( &crew_ble_hint, 0, sizeof( crew_ble_hint ));
+        return;
+    }
+
+    bool has_dr_profile = crew_ble_hint_minor_is_dr_profile( movement_hint.minor );
+    uint8_t movement_profile = has_dr_profile ? ( uint8_t ) movement_hint.minor : CREW_DR_PROFILE_NONE;
+
+    if(( crew_ble_hint.active ) && ( crew_ble_hint_matches_current( &movement_hint, movement_profile ) == false ))
+    {
+        if( crew_ble_hint_confirm_movement( &movement_hint, movement_profile ) == false )
+        {
+            return;
+        }
+
+        if( has_dr_profile == false )
+        {
+            crew_ble_accept_movement_only( &movement_hint, movement_profile );
+            return;
+        }
+    }
+
+    if( has_dr_profile == false )
+    {
+        /*
+         * Same approved beacon/location but no DR Minor. Keep it active for stability timing so a
+         * post-movement LinkCheck can refine DR, without changing DR directly from BLE.
+         */
+        if( crew_ble_hint.active == false )
+        {
+            crew_ble_accept_movement_only( &movement_hint, movement_profile );
+        }
+        return;
+    }
+
+    dr_hint = movement_hint;
+    uint8_t new_profile = ( uint8_t ) dr_hint.minor;
+    if(( crew_ble_hint.active == false ) || ( new_profile >= crew_ble_hint.profile ))
+    {
+        /*
+         * Higher Minor means worse RF. It is applied only after movement hysteresis above has decided
+         * that the strongest-beacon change is likely real movement through the vessel.
+         */
+        crew_dr_accept_ble_profile( &dr_hint, new_profile );
+        return;
+    }
+
+    /*
+     * Less conservative changes are delayed across scan sessions. The T1000-E only scans before an uplink,
+     * so scan-session confirmation is more meaningful than counting individual BLE advertisements.
+     */
+    if( crew_ble_hint.pending_upgrade_profile == new_profile )
+    {
+        crew_ble_hint.pending_upgrade_count++;
+    }
+    else
+    {
+        crew_ble_hint.pending_upgrade_profile = new_profile;
+        crew_ble_hint.pending_upgrade_count = 1;
+    }
+
+    if( crew_ble_hint.pending_upgrade_count >= CREW_DR_BLE_HINT_UPGRADE_CONFIRM_SCANS )
+    {
+        crew_dr_accept_ble_profile( &dr_hint, new_profile );
+    }
+    else
+    {
+        LOG_LORA( "Crew BLE hint upgrade pending: profile=%u count=%u/%u\n", new_profile,
+                  crew_ble_hint.pending_upgrade_count, CREW_DR_BLE_HINT_UPGRADE_CONFIRM_SCANS );
+    }
+#endif
+}
+
+static bool crew_dr_request_linkcheck( const char* reason )
+{
+#if CREW_DR_LINKCHECK_ENABLE
+    if(( crew_dr_ready == false ) || crew_linkcheck_pending )
+    {
+        return false;
+    }
+
+    /*
+     * The Basics Modem implements LinkCheckReq as a dedicated LINK_CHECK_REQ_TASK.
+     * That task sends the MAC command on the LoRaWAN network port (FPort 0), rather than
+     * piggybacking it inside the tracker payload on FPort 5. This keeps LinkCheck traffic
+     * clear of the current gateway shim filtering path.
+     *
+     * TODO: Update the gateway shim to forward MAC commands carried in FOpts by default,
+     * then we can revisit whether LinkCheck needs to remain a dedicated MAC-only uplink.
+     */
+    if( smtc_modem_lorawan_request_link_check( stack_id ) != SMTC_MODEM_RC_OK )
+    {
+        LOG_LORA( "WARN: Crew LinkCheck request failed (%s)\n", reason );
+        return false;
+    }
+
+    crew_linkcheck_pending = true;
+    crew_uplinks_since_linkcheck = 0;
+    LOG_LORA( "Crew LinkCheck requested (%s, dedicated MAC-only FPort 0 task)\n", reason );
+    return true;
+#else
+    UNUSED( reason );
+    return false;
+#endif
+}
+
+static void crew_dr_handle_link_status( smtc_modem_event_link_check_status_t status, uint8_t margin, uint8_t gw_cnt )
+{
+    if( crew_dr_ready == false )
+    {
+        return;
+    }
+
+    crew_linkcheck_pending = false;
+
+    /*
+     * LinkCheck replaces confirmed health uplinks for RF validation. It gives demod margin and gateway count,
+     * but still reflects the LNS that owns the LoRaWAN session.
+     */
+    if(( status != SMTC_MODEM_EVENT_LINK_CHECK_RECEIVED ) || ( gw_cnt == 0 ) || ( margin <= CREW_DR_LINKCHECK_LOW_MARGIN_DB ))
+    {
+        crew_linkcheck_good_streak = 0;
+        if( crew_dr.vessel_current > crew_dr.minimum )
+        {
+            crew_dr.vessel_current--;
+            LOG_LORA( "Crew LinkCheck weak: margin=%u gw=%u, step down to DR%u\n",
+                      margin, gw_cnt, crew_dr.vessel_current );
+            crew_dr_apply_fixed( crew_dr.vessel_current );
+            if( crew_ble_hint.active )
+            {
+                crew_ble_hint.linkcheck_refined_dr = true;
+            }
+        }
+        return;
+    }
+
+    if( margin >= CREW_DR_LINKCHECK_HIGH_MARGIN_DB )
+    {
+        /*
+         * BLE Minor is only the installer's initial RF hint. Once the tag is stable enough to run
+         * LinkCheckReq, let the measured demodulation margin correct that hint immediately.
+         *
+         * Keep CREW_DR_LINKCHECK_HIGH_MARGIN_DB as reserve, then spend the surplus margin in
+         * conservative CREW_DR_LINKCHECK_MARGIN_PER_DR_DB chunks. Example: DR3 with 21 dB margin
+         * has 6 dB above the reserve, so it can move two DR steps to DR5.
+         */
+        if( crew_dr.vessel_current < crew_dr.normal )
+        {
+            uint8_t previous_dr = crew_dr.vessel_current;
+            uint8_t spare_margin_db = margin - CREW_DR_LINKCHECK_HIGH_MARGIN_DB;
+            uint8_t step_count = 1 + ( spare_margin_db / CREW_DR_LINKCHECK_MARGIN_PER_DR_DB );
+            uint8_t target_dr = crew_dr.vessel_current + step_count;
+
+            crew_dr.vessel_current = crew_clamp_dr( target_dr, crew_dr.minimum, crew_dr.normal );
+            crew_linkcheck_good_streak = 0;
+            LOG_LORA( "Crew LinkCheck strong: margin=%u gw=%u, correct DR%u -> DR%u\n",
+                      margin, gw_cnt, previous_dr, crew_dr.vessel_current );
+            crew_dr_apply_fixed( crew_dr.vessel_current );
+            if( crew_ble_hint.active )
+            {
+                crew_ble_hint.linkcheck_refined_dr = true;
+            }
+        }
+        else
+        {
+            LOG_LORA( "Crew LinkCheck strong: margin=%u gw=%u already at DR%u\n",
+                      margin, gw_cnt, crew_dr.vessel_current );
+        }
+    }
+    else
+    {
+        crew_linkcheck_good_streak = 0;
+        LOG_LORA( "Crew LinkCheck stable: margin=%u gw=%u DR%u\n", margin, gw_cnt, crew_dr.vessel_current );
+    }
+}
+
+static void crew_dr_after_vessel_uplink( bool send_ok )
+{
+#if CREW_DR_LINKCHECK_ENABLE
+    if(( crew_dr_ready == false ) || ( send_ok == false ) || (( event_state & TRACKER_STATE_BIT7_SOS ) != 0 ))
+    {
+        return;
+    }
+
+    crew_uplinks_since_linkcheck++;
+    uint32_t now_s = hal_rtc_get_time_s( );
+
+    if( crew_ble_hint.active )
+    {
+        /*
+         * The tag only scans BLE before an uplink, then sleeps. Treat stability as the accepted DR profile
+         * staying stable across time, not continuous beacon visibility.
+         */
+        bool stable_enough = ( now_s - crew_ble_hint.stable_since_s ) >= CREW_DR_BLE_HINT_STABLE_LINKCHECK_S;
+        bool cooldown_ok = ( crew_ble_hint.last_forced_linkcheck_s == 0 ) ||
+                           (( now_s - crew_ble_hint.last_forced_linkcheck_s ) >=
+                            CREW_DR_BLE_HINT_LINKCHECK_COOLDOWN_S );
+
+        if( stable_enough && cooldown_ok && ( crew_ble_hint.linkcheck_sent_for_profile == false ))
+        {
+            if( crew_dr_request_linkcheck( "stable BLE hint" ))
+            {
+                crew_ble_hint.last_forced_linkcheck_s = now_s;
+                crew_ble_hint.linkcheck_sent_for_profile = true;
+            }
+            return;
+        }
+    }
+
+    uint16_t interval = crew_ble_hint.active ? CREW_DR_LINKCHECK_INTERVAL_WITH_HINT :
+                                               CREW_DR_LINKCHECK_INTERVAL_NO_HINT;
+    if( crew_uplinks_since_linkcheck >= interval )
+    {
+        crew_dr_request_linkcheck( crew_ble_hint.active ? "periodic with BLE hint" : "periodic no BLE hint" );
+    }
+#else
+    UNUSED( send_ok );
+#endif
 }
 
 static void on_modem_network_joined( void )
@@ -585,6 +1242,13 @@ static void on_modem_network_joined( void )
         // ASSERT_SMTC_MODEM_RC( smtc_modem_set_nb_trans( stack_id, custom_nb_trans_region ));
     }
 
+    crew_dr_configure_for_region( region );
+    if( crew_dr_ready )
+    {
+        crew_dr_apply_fixed( crew_dr.vessel_current );
+        ASSERT_SMTC_MODEM_RC( smtc_modem_set_nb_trans( stack_id, 1 ));
+    }
+
     switch( region )
     {
         case SMTC_MODEM_REGION_EU_868:
@@ -637,7 +1301,7 @@ static void on_modem_alarm( void )
 static void on_modem_tx_done( smtc_modem_event_txdone_status_t status )
 {
     static uint32_t uplink_count = 0;
-    HAL_DBG_TRACE_INFO( "Uplink count: %d\n", ++uplink_count );
+    LOG_LORA( "Uplink count: %d\n", ++uplink_count );
 
     if( status == SMTC_MODEM_EVENT_TXDONE_CONFIRMED )
     {
@@ -699,27 +1363,27 @@ static void on_modem_time_updated( smtc_modem_event_time_status_t status )
 static void on_modem_down_data( int8_t rssi, int8_t snr, smtc_modem_event_downdata_window_t rx_window, uint8_t port,
                                 const uint8_t* payload, uint8_t size )
 {
-    HAL_DBG_TRACE_INFO( "Downlink received:\n" );
-    HAL_DBG_TRACE_INFO( "  - LoRaWAN Fport = %d\n", port );
-    HAL_DBG_TRACE_INFO( "  - Payload size  = %d\n", size );
-    HAL_DBG_TRACE_INFO( "  - RSSI          = %d dBm\n", rssi - 64 );
-    HAL_DBG_TRACE_INFO( "  - SNR           = %d dB\n", snr >> 2 );
+    LOG_LORA( "Downlink received:\n" );
+    LOG_LORA( "  - LoRaWAN Fport = %d\n", port );
+    LOG_LORA( "  - Payload size  = %d\n", size );
+    LOG_LORA( "  - RSSI          = %d dBm\n", rssi - 64 );
+    LOG_LORA( "  - SNR           = %d dB\n", snr >> 2 );
 
     switch( rx_window )
     {
         case SMTC_MODEM_EVENT_DOWNDATA_WINDOW_RX1:
         {
-            HAL_DBG_TRACE_INFO( "  - Rx window     = %s\n", xstr( SMTC_MODEM_EVENT_DOWNDATA_WINDOW_RX1 ) );
+            LOG_LORA( "  - Rx window     = %s\n", xstr( SMTC_MODEM_EVENT_DOWNDATA_WINDOW_RX1 ) );
             break;
         }
         case SMTC_MODEM_EVENT_DOWNDATA_WINDOW_RX2:
         {
-            HAL_DBG_TRACE_INFO( "  - Rx window     = %s\n", xstr( SMTC_MODEM_EVENT_DOWNDATA_WINDOW_RX2 ) );
+            LOG_LORA( "  - Rx window     = %s\n", xstr( SMTC_MODEM_EVENT_DOWNDATA_WINDOW_RX2 ) );
             break;
         }
         case SMTC_MODEM_EVENT_DOWNDATA_WINDOW_RXC:
         {
-            HAL_DBG_TRACE_INFO( "  - Rx window     = %s\n", xstr( SMTC_MODEM_EVENT_DOWNDATA_WINDOW_RXC ) );
+            LOG_LORA( "  - Rx window     = %s\n", xstr( SMTC_MODEM_EVENT_DOWNDATA_WINDOW_RXC ) );
             break;
         }
     }
@@ -751,6 +1415,7 @@ static void app_tracker_ble_scan_end( void )
 {
     ble_scan_stop( );
     ble_get_results( tracker_ble_scan_data, &tracker_ble_scan_len );
+    crew_dr_handle_ble_hint_scan( );
     ble_display_results( );
     uint8_t len_max = ble_scan_max * 7;
     if( tracker_ble_scan_len > len_max ) tracker_ble_scan_len = len_max;
@@ -792,11 +1457,11 @@ static void app_tracker_gnss_scan_begin( void )
     if( !mob_tracker_is_active( ))
     {
         mob_tracker_activate( );
-        HAL_DBG_TRACE_INFO( "Marine GNSS activated - quality-driven scan mode\n" );
+        LOG_GNSS( "Marine GNSS activated - quality-driven scan mode\n" );
     }
     else
     {
-        HAL_DBG_TRACE_INFO( "Marine GNSS already active - continuing\n" );
+        LOG_GNSS( "Marine GNSS already active - continuing\n" );
     }
 }
 
@@ -809,7 +1474,7 @@ static void app_tracker_gnss_scan_end( void )
     
     if( state->mode == MOB_MODE_CANCELLED )
     {
-        HAL_DBG_TRACE_INFO( "Marine GNSS cancelled - BLE beacon found\\n" );
+        LOG_GNSS( "Marine GNSS cancelled - BLE beacon found\n" );
         // Clear scan data - no position uplink needed (cancellation sent by marine_gnss)
         tracker_gps_scan_len = 0;
         scan_result = true;  // Mark as result received to stop retry
@@ -819,9 +1484,9 @@ static void app_tracker_gnss_scan_end( void )
         // Store last fix from marine_gnss for gateway assistance
         gateway_assistance_store_own_fix( state->last_fix.latitude, state->last_fix.longitude );
         
-        HAL_DBG_TRACE_PRINTF( "Marine GNSS fix: lat=%ld, lon=%ld, HDOP=%.1f\\n",
-                             state->last_fix.latitude, state->last_fix.longitude,
-                             state->last_fix.hdop );
+        LOG_GNSS( "Marine GNSS fix: lat=%ld, lon=%ld, HDOP=%.1f\n",
+                  state->last_fix.latitude, state->last_fix.longitude,
+                  state->last_fix.hdop );
         
         // Don't prepare traditional uplink - marine_gnss sends its own MOB uplinks
         // Set scan_result to indicate we got a fix
@@ -830,7 +1495,7 @@ static void app_tracker_gnss_scan_end( void )
     }
     else
     {
-        HAL_DBG_TRACE_WARNING( "Marine GNSS - no valid fix yet\\n" );
+        LOG_GNSS( "WARN: Marine GNSS - no valid fix yet\n" );
         tracker_gps_scan_len = 0;
     }
 }
@@ -995,6 +1660,8 @@ static void app_tracker_scan_result_send( void )
         if( send_ok ) tracker_ble_scan_len = 0;
     }
 
+    crew_dr_after_vessel_uplink( send_ok );
+
     if( send_ok ) scan_result_num -= 1;
     if( scan_result_num )
     {
@@ -1021,13 +1688,13 @@ static void app_tracker_scan_process( void )
         if( tracker_scan_status == 0 )
         {
             // Start marine_gnss quality-driven scanning
-            HAL_DBG_TRACE_PRINTF( "marine_gnss begin\\n\\n" );
+            LOG_GNSS( "marine_gnss begin\n\n" );
             tracker_scan_begin = hal_rtc_get_time_s( );
             app_tracker_gnss_scan_begin( );
             // Process first cycle and get next delay
             uint32_t marine_delay = mob_tracker_process( );
             smtc_modem_alarm_start_timer( marine_delay );
-            HAL_DBG_TRACE_PRINTF( "marine_gnss next alarm %lu s\\n\\n", marine_delay );
+            LOG_GNSS( "marine_gnss next alarm %lu s\n\n", marine_delay );
             tracker_scan_status = 1;
         }
         else if( tracker_scan_status == 1 )
@@ -1037,7 +1704,7 @@ static void app_tracker_scan_process( void )
             {
                 uint32_t marine_delay = mob_tracker_process( );
                 smtc_modem_alarm_start_timer( marine_delay );
-                HAL_DBG_TRACE_PRINTF( "marine_gnss continuing, next alarm %lu s\\n\\n", marine_delay );
+                LOG_GNSS( "marine_gnss continuing, next alarm %lu s\n\n", marine_delay );
                 // Stay in status 1 until cancelled
             }
             else
@@ -1046,7 +1713,7 @@ static void app_tracker_scan_process( void )
                 app_tracker_gnss_scan_end( );
                 next_delay = (int32_t)( tracker_periodic_interval ) - ( hal_rtc_get_time_s( ) - tracker_scan_begin );
                 smtc_modem_alarm_start_timer( next_delay > 0 ? next_delay : 1 );
-                HAL_DBG_TRACE_PRINTF( "marine_gnss end, new alarm %d s\\n\\n", next_delay > 0 ? next_delay : 1 );
+                LOG_GNSS( "marine_gnss end, new alarm %d s\n\n", next_delay > 0 ? next_delay : 1 );
                 tracker_scan_status = 0xff;
             }
         }
@@ -1056,7 +1723,7 @@ static void app_tracker_scan_process( void )
         if( tracker_scan_status == 0 )
         {
             smtc_modem_alarm_start_timer( wifi_scan_duration );
-            HAL_DBG_TRACE_PRINTF( "wifi begin, new alarm %d s\n\n", wifi_scan_duration );
+            LOG_WIFI( "wifi begin, new alarm %d s\n\n", wifi_scan_duration );
             tracker_scan_begin = hal_rtc_get_time_s( );
             app_tracker_wifi_scan_begin( );
             tracker_scan_status = 1;
@@ -1065,7 +1732,7 @@ static void app_tracker_scan_process( void )
         {
             next_delay = (int32_t)( tracker_periodic_interval ) - wifi_scan_duration;
             smtc_modem_alarm_start_timer( next_delay > 0 ? next_delay : 1 );
-            HAL_DBG_TRACE_PRINTF( "wifi end, new alarm %d s\n\n", next_delay > 0 ? next_delay : 1 );
+            LOG_WIFI( "wifi end, new alarm %d s\n\n", next_delay > 0 ? next_delay : 1 );
             app_tracker_wifi_scan_end( );
             tracker_scan_status = 0xff;
         }
@@ -1075,7 +1742,7 @@ static void app_tracker_scan_process( void )
         if( tracker_scan_status == 0 )
         {
             smtc_modem_alarm_start_timer( wifi_scan_duration );
-            HAL_DBG_TRACE_PRINTF( "wifi begin, new alarm %d s\\n\\n", wifi_scan_duration );
+            LOG_WIFI( "wifi begin, new alarm %d s\n\n", wifi_scan_duration );
             tracker_scan_begin = hal_rtc_get_time_s( );
             app_tracker_wifi_scan_begin( );
             tracker_scan_status = 1;
@@ -1087,13 +1754,14 @@ static void app_tracker_scan_process( void )
             {
                 next_delay = (int32_t)( tracker_periodic_interval ) - wifi_scan_duration;
                 smtc_modem_alarm_start_timer( next_delay > 0 ? next_delay : 1 );
-                HAL_DBG_TRACE_PRINTF( "wifi end, new alarm %d s\\n\\n", next_delay > 0 ? next_delay : 1 );
+                LOG_WIFI( "wifi end, new alarm %d s\n\n", next_delay > 0 ? next_delay : 1 );
                 tracker_scan_status = 0xff;
             }
             else
             {
                 // WiFi failed - start marine_gnss
-                HAL_DBG_TRACE_PRINTF( "wifi end\\r\\nmarine_gnss begin\\n\\n" );
+                LOG_WIFI( "wifi end\r\n" );
+                LOG_GNSS( "marine_gnss begin\n\n" );
                 app_tracker_gnss_scan_begin( );
                 uint32_t marine_delay = mob_tracker_process( );
                 smtc_modem_alarm_start_timer( marine_delay );
@@ -1107,14 +1775,14 @@ static void app_tracker_scan_process( void )
             {
                 uint32_t marine_delay = mob_tracker_process( );
                 smtc_modem_alarm_start_timer( marine_delay );
-                HAL_DBG_TRACE_PRINTF( "marine_gnss continuing, next alarm %lu s\\n\\n", marine_delay );
+                LOG_GNSS( "marine_gnss continuing, next alarm %lu s\n\n", marine_delay );
             }
             else
             {
                 app_tracker_gnss_scan_end( );
                 next_delay = (int32_t)( tracker_periodic_interval ) - ( hal_rtc_get_time_s( ) - tracker_scan_begin );
                 smtc_modem_alarm_start_timer( next_delay > 0 ? next_delay : 1 );
-                HAL_DBG_TRACE_PRINTF( "marine_gnss end, new alarm %d s\\n\\n", next_delay > 0 ? next_delay : 1 );
+                LOG_GNSS( "marine_gnss end, new alarm %d s\n\n", next_delay > 0 ? next_delay : 1 );
                 tracker_scan_status = 0xff;
             }
         }
@@ -1124,7 +1792,7 @@ static void app_tracker_scan_process( void )
         if( tracker_scan_status == 0 )
         {
             // Start marine_gnss first
-            HAL_DBG_TRACE_PRINTF( "marine_gnss begin\\n\\n" );
+            LOG_GNSS( "marine_gnss begin\n\n" );
             tracker_scan_begin = hal_rtc_get_time_s( );
             app_tracker_gnss_scan_begin( );
             uint32_t marine_delay = mob_tracker_process( );
@@ -1137,7 +1805,7 @@ static void app_tracker_scan_process( void )
             {
                 uint32_t marine_delay = mob_tracker_process( );
                 smtc_modem_alarm_start_timer( marine_delay );
-                HAL_DBG_TRACE_PRINTF( "marine_gnss continuing, next alarm %lu s\\n\\n", marine_delay );
+                LOG_GNSS( "marine_gnss continuing, next alarm %lu s\n\n", marine_delay );
             }
             else
             {
@@ -1146,13 +1814,14 @@ static void app_tracker_scan_process( void )
                 {
                     next_delay = (int32_t)( tracker_periodic_interval ) - ( hal_rtc_get_time_s( ) - tracker_scan_begin );
                     smtc_modem_alarm_start_timer( next_delay > 0 ? next_delay : 1 );
-                    HAL_DBG_TRACE_PRINTF( "marine_gnss end, new alarm %d s\\n\\n", next_delay > 0 ? next_delay : 1 );
+                    LOG_GNSS( "marine_gnss end, new alarm %d s\n\n", next_delay > 0 ? next_delay : 1 );
                     tracker_scan_status = 0xff;
                 }
                 else
                 {
                     smtc_modem_alarm_start_timer( wifi_scan_duration );
-                    HAL_DBG_TRACE_PRINTF( "marine_gnss end\\r\\nwifi begin, new alarm %d s\\n\\n", wifi_scan_duration );
+                    LOG_GNSS( "marine_gnss end\r\n" );
+                    LOG_WIFI( "wifi begin, new alarm %d s\n\n", wifi_scan_duration );
                     app_tracker_wifi_scan_begin( );
                     tracker_scan_status = 2;
                 }
@@ -1162,7 +1831,7 @@ static void app_tracker_scan_process( void )
         {
             next_delay = (int32_t)( tracker_periodic_interval ) - ( hal_rtc_get_time_s( ) - tracker_scan_begin );
             smtc_modem_alarm_start_timer( next_delay > 0 ? next_delay : 1 );
-            HAL_DBG_TRACE_PRINTF( "wifi end, new alarm %d s\\n\\n", next_delay > 0 ? next_delay : 1 );
+            LOG_WIFI( "wifi end, new alarm %d s\n\n", next_delay > 0 ? next_delay : 1 );
             app_tracker_wifi_scan_end( );
             tracker_scan_status = 0xff;
         }
@@ -1172,7 +1841,7 @@ static void app_tracker_scan_process( void )
         if( tracker_scan_status == 0 )
         {
             smtc_modem_alarm_start_timer( ble_scan_duration );
-            HAL_DBG_TRACE_PRINTF( "ble begin, new alarm %d s\n\n", ble_scan_duration );
+            LOG_BLE( "ble begin, new alarm %d s\n\n", ble_scan_duration );
             tracker_scan_begin = hal_rtc_get_time_s( );
             app_tracker_ble_scan_begin( );
             tracker_scan_status = 1;
@@ -1181,7 +1850,7 @@ static void app_tracker_scan_process( void )
         {
             next_delay = (int32_t)( tracker_periodic_interval ) - ble_scan_duration;
             smtc_modem_alarm_start_timer( next_delay > 0 ? next_delay : 1 );
-            HAL_DBG_TRACE_PRINTF( "ble end, new alarm %d s\n\n", next_delay > 0 ? next_delay : 1 );
+            LOG_BLE( "ble end, new alarm %d s\n\n", next_delay > 0 ? next_delay : 1 );
             app_tracker_ble_scan_end( );
             tracker_scan_status = 0xff;
         }
@@ -1191,7 +1860,7 @@ static void app_tracker_scan_process( void )
         if( tracker_scan_status == 0 )
         {
             smtc_modem_alarm_start_timer( ble_scan_duration );
-            HAL_DBG_TRACE_PRINTF( "ble begin, new alarm %d s\n\n", ble_scan_duration );
+            LOG_BLE( "ble begin, new alarm %d s\n\n", ble_scan_duration );
             tracker_scan_begin = hal_rtc_get_time_s( );
             app_tracker_ble_scan_begin( );
             tracker_scan_status = 1;
@@ -1203,13 +1872,14 @@ static void app_tracker_scan_process( void )
             {
                 next_delay = (int32_t)( tracker_periodic_interval ) - ble_scan_duration;
                 smtc_modem_alarm_start_timer( next_delay > 0 ? next_delay : 1 );
-                HAL_DBG_TRACE_PRINTF( "ble end, new alarm %d s\n\n", next_delay > 0 ? next_delay : 1 );
+                LOG_BLE( "ble end, new alarm %d s\n\n", next_delay > 0 ? next_delay : 1 );
                 tracker_scan_status = 0xff;
             }
             else
             {
                 smtc_modem_alarm_start_timer( wifi_scan_duration );
-                HAL_DBG_TRACE_PRINTF( "ble end\r\nwifi begin, new alarm %d s\n\n", wifi_scan_duration );
+                LOG_BLE( "ble end\r\n" );
+                LOG_WIFI( "wifi begin, new alarm %d s\n\n", wifi_scan_duration );
                 app_tracker_wifi_scan_begin( );
                 tracker_scan_status = 2;
             }
@@ -1218,7 +1888,7 @@ static void app_tracker_scan_process( void )
         {
             next_delay = (int32_t)( tracker_periodic_interval ) - ble_scan_duration - wifi_scan_duration;
             smtc_modem_alarm_start_timer( next_delay > 0 ? next_delay : 1 );
-            HAL_DBG_TRACE_PRINTF( "wifi end, new alarm %d s\n\n", next_delay > 0 ? next_delay : 1 );
+            LOG_WIFI( "wifi end, new alarm %d s\n\n", next_delay > 0 ? next_delay : 1 );
             app_tracker_wifi_scan_end( );
             tracker_scan_status = 0xff;
         }
@@ -1229,7 +1899,7 @@ static void app_tracker_scan_process( void )
         {
             // Run BLE scan first
             smtc_modem_alarm_start_timer( ble_scan_duration );
-            HAL_DBG_TRACE_PRINTF( "ble begin, new alarm %d s\\n\\n", ble_scan_duration );
+            LOG_BLE( "ble begin, new alarm %d s\n\n", ble_scan_duration );
             tracker_scan_begin = hal_rtc_get_time_s( );
             app_tracker_ble_scan_begin( );
             tracker_scan_status = 1;
@@ -1246,13 +1916,14 @@ static void app_tracker_scan_process( void )
                 }
                 next_delay = (int32_t)( tracker_periodic_interval ) - ble_scan_duration;
                 smtc_modem_alarm_start_timer( next_delay > 0 ? next_delay : 1 );
-                HAL_DBG_TRACE_PRINTF( "ble end, new alarm %d s\\n\\n", next_delay > 0 ? next_delay : 1 );
+                LOG_BLE( "ble end, new alarm %d s\n\n", next_delay > 0 ? next_delay : 1 );
                 tracker_scan_status = 0xff;
             }
             else
             {
                 // BLE failed - start marine_gnss
-                HAL_DBG_TRACE_PRINTF( "ble end\\r\\nmarine_gnss begin\\n\\n" );
+                LOG_BLE( "ble end\r\n" );
+                LOG_GNSS( "marine_gnss begin\n\n" );
                 app_tracker_gnss_scan_begin( );
                 uint32_t marine_delay = mob_tracker_process( );
                 smtc_modem_alarm_start_timer( marine_delay );
@@ -1265,14 +1936,14 @@ static void app_tracker_scan_process( void )
             {
                 uint32_t marine_delay = mob_tracker_process( );
                 smtc_modem_alarm_start_timer( marine_delay );
-                HAL_DBG_TRACE_PRINTF( "marine_gnss continuing, next alarm %lu s\\n\\n", marine_delay );
+                LOG_GNSS( "marine_gnss continuing, next alarm %lu s\n\n", marine_delay );
             }
             else
             {
                 app_tracker_gnss_scan_end( );
                 next_delay = (int32_t)( tracker_periodic_interval ) - ( hal_rtc_get_time_s( ) - tracker_scan_begin );
                 smtc_modem_alarm_start_timer( next_delay > 0 ? next_delay : 1 );
-                HAL_DBG_TRACE_PRINTF( "marine_gnss end, new alarm %d s\\n\\n", next_delay > 0 ? next_delay : 1 );
+                LOG_GNSS( "marine_gnss end, new alarm %d s\n\n", next_delay > 0 ? next_delay : 1 );
                 tracker_scan_status = 0xff;
             }
         }
@@ -1283,7 +1954,7 @@ static void app_tracker_scan_process( void )
         {
             // Always run BLE scan first, even during almanac maintenance
             smtc_modem_alarm_start_timer( ble_scan_duration );
-            HAL_DBG_TRACE_PRINTF( "ble begin, new alarm %d s\\n\\n", ble_scan_duration );
+            LOG_BLE( "ble begin, new alarm %d s\n\n", ble_scan_duration );
             tracker_scan_begin = hal_rtc_get_time_s( );
             app_tracker_ble_scan_begin( );
             tracker_scan_status = 1;
@@ -1300,13 +1971,14 @@ static void app_tracker_scan_process( void )
                 }
                 next_delay = (int32_t)( tracker_periodic_interval ) - ble_scan_duration;
                 smtc_modem_alarm_start_timer( next_delay > 0 ? next_delay : 1 );
-                HAL_DBG_TRACE_PRINTF( "ble end, new alarm %d s\\n\\n", next_delay > 0 ? next_delay : 1 );
+                LOG_BLE( "ble end, new alarm %d s\n\n", next_delay > 0 ? next_delay : 1 );
                 tracker_scan_status = 0xff;
             }
             else
             {
                 smtc_modem_alarm_start_timer( wifi_scan_duration );
-                HAL_DBG_TRACE_PRINTF( "ble end\\r\\nwifi begin, new alarm %d s\\n\\n", wifi_scan_duration );
+                LOG_BLE( "ble end\r\n" );
+                LOG_WIFI( "wifi begin, new alarm %d s\n\n", wifi_scan_duration );
                 app_tracker_wifi_scan_begin( );
                 tracker_scan_status = 2;
             }
@@ -1318,13 +1990,14 @@ static void app_tracker_scan_process( void )
             {
                 next_delay = (int32_t)( tracker_periodic_interval ) - ble_scan_duration - wifi_scan_duration;
                 smtc_modem_alarm_start_timer( next_delay > 0 ? next_delay : 1 );
-                HAL_DBG_TRACE_PRINTF( "wifi end, new alarm %d s\\n\\n", next_delay > 0 ? next_delay : 1 );
+                LOG_WIFI( "wifi end, new alarm %d s\n\n", next_delay > 0 ? next_delay : 1 );
                 tracker_scan_status = 0xff;
             }
             else
             {
                 // WiFi failed - start marine_gnss
-                HAL_DBG_TRACE_PRINTF( "wifi end\\r\\nmarine_gnss begin\\n\\n" );
+                LOG_WIFI( "wifi end\r\n" );
+                LOG_GNSS( "marine_gnss begin\n\n" );
                 app_tracker_gnss_scan_begin( );
                 uint32_t marine_delay = mob_tracker_process( );
                 smtc_modem_alarm_start_timer( marine_delay );
@@ -1337,14 +2010,14 @@ static void app_tracker_scan_process( void )
             {
                 uint32_t marine_delay = mob_tracker_process( );
                 smtc_modem_alarm_start_timer( marine_delay );
-                HAL_DBG_TRACE_PRINTF( "marine_gnss continuing, next alarm %lu s\\n\\n", marine_delay );
+                LOG_GNSS( "marine_gnss continuing, next alarm %lu s\n\n", marine_delay );
             }
             else
             {
                 app_tracker_gnss_scan_end( );
                 next_delay = (int32_t)( tracker_periodic_interval ) - ( hal_rtc_get_time_s( ) - tracker_scan_begin );
                 smtc_modem_alarm_start_timer( next_delay > 0 ? next_delay : 1 );
-                HAL_DBG_TRACE_PRINTF( "marine_gnss end, new alarm %d s\\n\\n", next_delay > 0 ? next_delay : 1 );
+                LOG_GNSS( "marine_gnss end, new alarm %d s\n\n", next_delay > 0 ? next_delay : 1 );
                 tracker_scan_status = 0xff;
             }
         }
@@ -1356,7 +2029,8 @@ static void app_tracker_scan_process( void )
     }
 }
 
-bool app_send_frame( const uint8_t* buffer, const uint8_t length, bool tx_confirmed, bool emergency )
+static bool app_send_frame_on_port( uint8_t port, const uint8_t* buffer, const uint8_t length, bool tx_confirmed,
+                                    bool emergency )
 {
     uint8_t tx_max_payload;
     int32_t duty_cycle;
@@ -1365,30 +2039,146 @@ bool app_send_frame( const uint8_t* buffer, const uint8_t length, bool tx_confir
     ASSERT_SMTC_MODEM_RC( smtc_modem_get_duty_cycle_status( &duty_cycle ) );
     if( duty_cycle < 0 )
     {
-        HAL_DBG_TRACE_WARNING( "Duty-cycle limitation - next possible uplink in %d ms \n\n", duty_cycle );
+        LOG_LORA( "WARN: Duty-cycle limitation - next possible uplink in %d ms \n\n", duty_cycle );
         return false;
     }
 
     ASSERT_SMTC_MODEM_RC( smtc_modem_get_next_tx_max_payload( stack_id, &tx_max_payload ) );
     if( length > tx_max_payload )
     {
-        HAL_DBG_TRACE_WARNING( "Not enough space in buffer - send empty uplink to flush MAC commands \n" );
-        ASSERT_SMTC_MODEM_RC( smtc_modem_request_empty_uplink( stack_id, true, LORAWAN_APP_PORT, tx_confirmed ));
+        LOG_LORA( "WARN: Not enough space in buffer - send empty uplink to flush MAC commands \n" );
+        ASSERT_SMTC_MODEM_RC( smtc_modem_request_empty_uplink( stack_id, true, port, tx_confirmed ));
         return false;
     }
     else
     {
-        HAL_DBG_TRACE_INFO( "Request uplink\n" );
+        LOG_LORA( "Request uplink\n" );
         if( emergency )
         {
-            ASSERT_SMTC_MODEM_RC ( smtc_modem_request_emergency_uplink( stack_id, LORAWAN_APP_PORT, tx_confirmed, buffer, length ));
+            ASSERT_SMTC_MODEM_RC ( smtc_modem_request_emergency_uplink( stack_id, port, tx_confirmed, buffer, length ));
         }
         else
         {
-            ASSERT_SMTC_MODEM_RC( smtc_modem_request_uplink( stack_id, LORAWAN_APP_PORT, tx_confirmed, buffer, length ));
+            ASSERT_SMTC_MODEM_RC( smtc_modem_request_uplink( stack_id, port, tx_confirmed, buffer, length ));
         }
         return true;
     }
+}
+
+static bool app_send_frame_on_port_ext( uint8_t port, const uint8_t* buffer, const uint8_t length, bool tx_confirmed,
+                                        bool emergency, uint8_t extended_id )
+{
+    uint8_t tx_max_payload;
+    int32_t duty_cycle;
+
+    if(( extended_id == 0 ) || ( extended_id > 2 ))
+    {
+        return app_send_frame_on_port( port, buffer, length, tx_confirmed, emergency );
+    }
+
+    ASSERT_SMTC_MODEM_RC( smtc_modem_get_duty_cycle_status( &duty_cycle ) );
+    if( duty_cycle < 0 )
+    {
+        LOG_LORA( "WARN: Duty-cycle limitation - next possible uplink in %d ms \n\n", duty_cycle );
+        return false;
+    }
+
+    ASSERT_SMTC_MODEM_RC( smtc_modem_get_next_tx_max_payload( stack_id, &tx_max_payload ) );
+    if( length > tx_max_payload )
+    {
+        LOG_LORA( "WARN: Not enough space in extended uplink buffer\n" );
+        return false;
+    }
+
+    memcpy( crew_burst_ext_payload[extended_id - 1], buffer, length );
+    crew_burst_ext_len[extended_id - 1] = length;
+
+    /* The SDK has no emergency-priority extended uplink API; only burst slot 0 can use emergency priority. */
+    UNUSED( emergency );
+    ASSERT_SMTC_MODEM_RC( smtc_modem_request_extended_uplink( stack_id, port, tx_confirmed,
+                                                              crew_burst_ext_payload[extended_id - 1],
+                                                              crew_burst_ext_len[extended_id - 1],
+                                                              extended_id, crew_extended_uplink_done ));
+
+    return true;
+}
+
+bool app_send_frame( const uint8_t* buffer, const uint8_t length, bool tx_confirmed, bool emergency )
+{
+    if(( crew_dr_ready ) && ( length > 1 ) && (( buffer[1] & TRACKER_STATE_BIT7_SOS ) != 0 ))
+    {
+        return crew_send_dr_burst_on_port( LORAWAN_APP_PORT, buffer, length, tx_confirmed, true );
+    }
+
+    /*
+     * Normal vessel uplinks must re-tag the queued modem task with the current crew DR.
+     * Background MAC tasks such as DeviceTimeReq/LinkCheckReq can otherwise advance or alter the
+     * modem ADR state between BLE scans, which showed up in field logs as Minor 3 selecting DR3
+     * once and later FPort 5 uplinks drifting down to SF11.
+     */
+    if( crew_dr_ready )
+    {
+        crew_dr_prepare_next_uplink( crew_dr.vessel_current );
+    }
+
+    return app_send_frame_on_port( LORAWAN_APP_PORT, buffer, length, tx_confirmed, emergency );
+}
+
+bool app_send_mob_frame( const uint8_t* buffer, const uint8_t length, bool tx_confirmed, app_mob_dr_policy_t policy )
+{
+    if( crew_dr_ready )
+    {
+        crew_dr_prepare_next_uplink( crew_dr_for_mob_policy( policy ) );
+    }
+
+    return app_send_frame_on_port( CREW_MOB_APP_PORT, buffer, length, tx_confirmed, false );
+}
+
+bool app_send_mob_initial_burst( const uint8_t* buffer, const uint8_t length, bool tx_confirmed )
+{
+    if( crew_dr_ready == false )
+    {
+        return app_send_frame_on_port( CREW_MOB_APP_PORT, buffer, length, tx_confirmed, true );
+    }
+
+    return crew_send_dr_burst_on_port( CREW_MOB_APP_PORT, buffer, length, tx_confirmed, true );
+}
+
+static bool crew_send_dr_burst_on_port( uint8_t port, const uint8_t* buffer, const uint8_t length, bool tx_confirmed,
+                                        bool emergency )
+{
+    uint8_t burst_dr[3];
+    bool send_ok = true;
+
+    if( crew_dr_ready == false )
+    {
+        return app_send_frame_on_port( port, buffer, length, tx_confirmed, emergency );
+    }
+
+    /* Same payload, three link budgets: fast reacquisition first, then persistence, then SOS penetration DR. */
+    burst_dr[0] = crew_dr.normal;
+    burst_dr[1] = crew_dr.persistence;
+    burst_dr[2] = crew_dr.sos_low;
+
+    for( uint8_t i = 0; i < 3; i++ )
+    {
+        crew_dr_prepare_next_uplink( burst_dr[i] );
+        send_ok &= app_send_frame_on_port_ext( port, buffer, length, tx_confirmed, emergency, i );
+
+        if( i < 2 )
+        {
+            /* Jitter reduces self-collision with queued radio work and avoids fixed burst timing. */
+            uint32_t jitter_ms = smtc_modem_hal_get_random_nb_in_range( 1000, 2000 );
+            hal_mcu_wait_ms( jitter_ms );
+        }
+    }
+
+    crew_dr_apply_fixed( crew_dr.normal );
+    return send_ok;
+}
+
+static void crew_extended_uplink_done( void )
+{
 }
 
 void app_tracker_new_run( uint8_t event )
