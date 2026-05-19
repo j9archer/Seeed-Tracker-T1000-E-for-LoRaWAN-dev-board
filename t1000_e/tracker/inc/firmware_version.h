@@ -19,17 +19,21 @@ extern "C" {
 #define FIRMWARE_VERSION_MAJOR      1
 #define FIRMWARE_VERSION_MINOR      0
 #define FIRMWARE_VERSION_PATCH      0
-#define FIRMWARE_VERSION_BUILD      23
+#define FIRMWARE_VERSION_BUILD      24
 
-// Version string (e.g., "1.0.0-b23")
-#define FIRMWARE_VERSION_STRING     "1.0.0-b23"
+// Version string (e.g., "1.0.0-b24")
+#define FIRMWARE_VERSION_STRING     "1.0.0-b24"
 
 // Version features (changelog for this version)
-#define FIRMWARE_VERSION_FEATURES   "Deterministic Crew Tag ABP defaults"
+#define FIRMWARE_VERSION_FEATURES   "Derived ABP overwrites stored ABP keys"
 
 /*
  * Version History:
  * 
+ * v1.0.0-b24 (2026-05-19)
+ *   - CHANGED: ABP mode always replaces stored DevAddr/NwkSKey/AppSKey with deterministic derived values
+ *   - CHANGED: Derived ABP values are persisted only when they differ from stored config to avoid repeated flash writes
+ *
  * v1.0.0-b23 (2026-05-19)
  *   - ADDED: Deterministic ABP defaults for Crew Tags using factory DevEUI plus RemEX master key/NetID
  *   - CHANGED: ABP is the default activation mode while OTAA remains selectable through the config app

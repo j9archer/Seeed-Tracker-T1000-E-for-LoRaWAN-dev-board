@@ -21,6 +21,7 @@
 #include "modem_context.h"
 
 #include "app_config_param.h"
+#include "app_at_fds_datas.h"
 #include "remex_abp_derive.h"
 
 /*
@@ -211,20 +212,42 @@ void apps_modem_common_configure_lorawan_params( uint8_t stack_id )
 
     if( activation_mode == ACTIVATION_MODE_ABP )
     {
-        if( ( dev_addr == 0 ) || is_all_zero( app_s_key, sizeof( app_s_key ) ) ||
-            is_all_zero( nwk_s_key, sizeof( nwk_s_key ) ) )
+        /*
+         * ABP is generated state, not user-owned provisioning data. Recompute it
+         * on boot and replace any old/manual ABP values left in FDS after flashing.
+         * Persist only when values changed, avoiding repeated flash writes.
+         */
+        if( !is_all_zero( dev_eui, sizeof( dev_eui ) ) &&
+            remex_abp_derive_session( dev_eui, &dev_addr, nwk_s_key, app_s_key ) == true )
         {
-            if( !is_all_zero( dev_eui, sizeof( dev_eui ) ) &&
-                remex_abp_derive_session( dev_eui, &dev_addr, nwk_s_key, app_s_key ) == true )
+            bool abp_changed = false;
+
+            if( app_param.lora_info.DevAddr != dev_addr )
             {
                 app_param.lora_info.DevAddr = dev_addr;
-                memcpy1( app_param.lora_info.NwkSKey, nwk_s_key, sizeof( app_param.lora_info.NwkSKey ) );
-                memcpy1( app_param.lora_info.AppSKey, app_s_key, sizeof( app_param.lora_info.AppSKey ) );
+                abp_changed = true;
             }
-            else
+
+            if( memcmp( app_param.lora_info.NwkSKey, nwk_s_key, sizeof( app_param.lora_info.NwkSKey ) ) != 0 )
             {
-                HAL_DBG_TRACE_ERROR( "RemEX ABP derivation failed\n" );
+                memcpy1( app_param.lora_info.NwkSKey, nwk_s_key, sizeof( app_param.lora_info.NwkSKey ) );
+                abp_changed = true;
             }
+
+            if( memcmp( app_param.lora_info.AppSKey, app_s_key, sizeof( app_param.lora_info.AppSKey ) ) != 0 )
+            {
+                memcpy1( app_param.lora_info.AppSKey, app_s_key, sizeof( app_param.lora_info.AppSKey ) );
+                abp_changed = true;
+            }
+
+            if( abp_changed && !write_current_param_config( ) )
+            {
+                HAL_DBG_TRACE_ERROR( "Failed to persist derived RemEX ABP session\n" );
+            }
+        }
+        else
+        {
+            HAL_DBG_TRACE_ERROR( "RemEX ABP derivation failed\n" );
         }
     }
 
