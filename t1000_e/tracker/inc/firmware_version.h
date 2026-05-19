@@ -19,17 +19,22 @@ extern "C" {
 #define FIRMWARE_VERSION_MAJOR      1
 #define FIRMWARE_VERSION_MINOR      0
 #define FIRMWARE_VERSION_PATCH      0
-#define FIRMWARE_VERSION_BUILD      22
+#define FIRMWARE_VERSION_BUILD      23
 
-// Version string (e.g., "1.0.0-b22")
-#define FIRMWARE_VERSION_STRING     "1.0.0-b22"
+// Version string (e.g., "1.0.0-b23")
+#define FIRMWARE_VERSION_STRING     "1.0.0-b23"
 
 // Version features (changelog for this version)
-#define FIRMWARE_VERSION_FEATURES   "Approved UUID movement independent of Minor"
+#define FIRMWARE_VERSION_FEATURES   "Deterministic Crew Tag ABP defaults"
 
 /*
  * Version History:
  * 
+ * v1.0.0-b23 (2026-05-19)
+ *   - ADDED: Deterministic ABP defaults for Crew Tags using factory DevEUI plus RemEX master key/NetID
+ *   - CHANGED: ABP is the default activation mode while OTAA remains selectable through the config app
+ *   - CHANGED: Missing DevEUI/AppKey values are left empty instead of falling back to build-time identity constants
+ *
  * v1.0.0-b22 (2026-05-15)
  *   - CHANGED: BLE movement detection uses strongest approved UUID beacon even when Minor is not 1..5
  *   - CHANGED: Minor 1..5 remains required for direct BLE DR changes; unconfigured Minors only reset stability/LinkCheck timing

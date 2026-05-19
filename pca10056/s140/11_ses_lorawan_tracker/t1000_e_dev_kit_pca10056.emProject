@@ -134,6 +134,7 @@
       <file file_name="../../../apps/common/smtc_modem_api_str.c" />
       <file file_name="../../../apps/common/lorawan_key_config.h" />
       <file file_name="../../../apps/common/apps_modem_common_ex.c" />
+      <file file_name="../../../apps/common/remex_abp_derive.c" />
     </folder>
     <folder Name="LBM_lr1mac">
       <file file_name="../../../lora_basics_modem/smtc_modem_core/lr1mac/src/lr1_stack_mac_layer.c" />

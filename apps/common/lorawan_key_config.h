@@ -88,11 +88,15 @@ extern "C" {
 // #define LORAWAN_JOIN_EUI    "0000000000000000"
 // #define LORAWAN_APP_KEY     "EC6B1047B76B2C3C92CF9A128A5CCFEC"
 
-#define LORAWAN_REGION      SMTC_MODEM_REGION_EU_868
-#define LORAWAN_CLASS       SMTC_MODEM_CLASS_A
-#define LORAWAN_DEVICE_EUI  "2CF7F1F073600063"
-#define LORAWAN_JOIN_EUI    "0000000000000000"
-#define LORAWAN_APP_KEY     "25D0D24B05080F8E56DED53947C11F5B"
+/*
+ * Deterministic RemEX ABP defaults.
+ *
+ * REMEX_ABP_MASTER_KEY is the fleet secret used to derive DevAddr, NwkSKey,
+ * and AppSKey from DevEUI. Override it in the build or replace this test value
+ * before producing fleet firmware.
+ */
+#define REMEX_ABP_MASTER_KEY "25D0D24B05080F8E56DED53947C11F5B"
+#define REMEX_ABP_NET_ID     "E00110"
 
 /*
  * -----------------------------------------------------------------------------

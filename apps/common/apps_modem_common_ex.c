@@ -21,6 +21,7 @@
 #include "modem_context.h"
 
 #include "app_config_param.h"
+#include "remex_abp_derive.h"
 
 /*
  * -----------------------------------------------------------------------------
@@ -71,6 +72,26 @@ static bool is_all_zero( const uint8_t* buf, size_t len )
             return false;
         }
     }
+    return true;
+}
+
+static bool load_stored_deveui( uint8_t stack_id, uint8_t dev_eui[8] )
+{
+    smtc_modem_return_code_t rc = smtc_modem_get_deveui( stack_id, dev_eui );
+
+    if( rc != SMTC_MODEM_RC_OK )
+    {
+        HAL_DBG_TRACE_ERROR( "smtc_modem_get_deveui failed: rc=%s (%d)\n", smtc_modem_return_code_to_str( rc ), rc );
+        return false;
+    }
+
+    if( is_all_zero( dev_eui, SMTC_MODEM_EUI_LENGTH ) )
+    {
+        HAL_DBG_TRACE_ERROR( "Stored DevEUI is empty; configure DevEUI before LoRaWAN activation\n" );
+        return false;
+    }
+
+    memcpy1( app_param.lora_info.DevEui, dev_eui, sizeof( app_param.lora_info.DevEui ) );
     return true;
 }
 
@@ -178,38 +199,66 @@ void apps_modem_common_configure_lorawan_params( uint8_t stack_id )
     memcpy1( app_s_key, app_param.lora_info.AppSKey, 16 );
     memcpy1( nwk_s_key, app_param.lora_info.NwkSKey, 16 );
 
+    if( is_all_zero( dev_eui, sizeof( dev_eui ) ) )
+    {
+        /*
+         * Identity comes from factory/device storage, not lorawan_key_config.h.
+         * If storage is empty, leave DevEUI empty so provisioning fails visibly
+         * instead of accidentally cloning a compile-time DevEUI onto many tags.
+         */
+        ( void ) load_stored_deveui( stack_id, dev_eui );
+    }
+
+    if( activation_mode == ACTIVATION_MODE_ABP )
+    {
+        if( ( dev_addr == 0 ) || is_all_zero( app_s_key, sizeof( app_s_key ) ) ||
+            is_all_zero( nwk_s_key, sizeof( nwk_s_key ) ) )
+        {
+            if( !is_all_zero( dev_eui, sizeof( dev_eui ) ) &&
+                remex_abp_derive_session( dev_eui, &dev_addr, nwk_s_key, app_s_key ) == true )
+            {
+                app_param.lora_info.DevAddr = dev_addr;
+                memcpy1( app_param.lora_info.NwkSKey, nwk_s_key, sizeof( app_param.lora_info.NwkSKey ) );
+                memcpy1( app_param.lora_info.AppSKey, app_s_key, sizeof( app_param.lora_info.AppSKey ) );
+            }
+            else
+            {
+                HAL_DBG_TRACE_ERROR( "RemEX ABP derivation failed\n" );
+            }
+        }
+    }
+
     if( activation_mode == ACTIVATION_MODE_OTAA )
     {
-        // Fallback: if any OTAA credential is all-zero, load from lorawan_key_config.h macros
-        if( is_all_zero( dev_eui, sizeof( dev_eui ) ) )
+        /*
+         * OTAA credentials are factory-flashed or entered through the config app.
+         * Do not fill missing DevEUI/JoinEUI/AppKey from build-time constants.
+         */
+        if( !is_all_zero( dev_eui, sizeof( dev_eui ) ) )
         {
-            hal_hex_to_bin( LORAWAN_DEVICE_EUI, dev_eui, sizeof( dev_eui ) );
-        }
-        if( is_all_zero( join_eui, sizeof( join_eui ) ) )
-        {
-            hal_hex_to_bin( LORAWAN_JOIN_EUI, join_eui, sizeof( join_eui ) );
-        }
-        if( is_all_zero( app_key, sizeof( app_key ) ) )
-        {
-            hal_hex_to_bin( LORAWAN_APP_KEY, app_key, sizeof( app_key ) );
-        }
-
-        rc = smtc_modem_set_deveui( stack_id, dev_eui );
-        if( rc != SMTC_MODEM_RC_OK )
-        {
-            HAL_DBG_TRACE_ERROR( "smtc_modem_set_deveui failed: rc=%s (%d)\n", smtc_modem_return_code_to_str( rc ), rc );
+            rc = smtc_modem_set_deveui( stack_id, dev_eui );
+            if( rc != SMTC_MODEM_RC_OK )
+            {
+                HAL_DBG_TRACE_ERROR( "smtc_modem_set_deveui failed: rc=%s (%d)\n", smtc_modem_return_code_to_str( rc ), rc );
+            }
         }
 
-        rc = smtc_modem_set_joineui( stack_id, join_eui );
-        if( rc != SMTC_MODEM_RC_OK )
+        if( !is_all_zero( join_eui, sizeof( join_eui ) ) )
         {
-            HAL_DBG_TRACE_ERROR( "smtc_modem_set_joineui failed: rc=%s (%d)\n", smtc_modem_return_code_to_str( rc ), rc );
+            rc = smtc_modem_set_joineui( stack_id, join_eui );
+            if( rc != SMTC_MODEM_RC_OK )
+            {
+                HAL_DBG_TRACE_ERROR( "smtc_modem_set_joineui failed: rc=%s (%d)\n", smtc_modem_return_code_to_str( rc ), rc );
+            }
         }
 
-        rc = smtc_modem_set_nwkkey( stack_id, app_key );
-        if( rc != SMTC_MODEM_RC_OK )
+        if( !is_all_zero( app_key, sizeof( app_key ) ) )
         {
-            HAL_DBG_TRACE_ERROR( "smtc_modem_set_nwkkey failed: rc=%s (%d)\n", smtc_modem_return_code_to_str( rc ), rc );
+            rc = smtc_modem_set_nwkkey( stack_id, app_key );
+            if( rc != SMTC_MODEM_RC_OK )
+            {
+                HAL_DBG_TRACE_ERROR( "smtc_modem_set_nwkkey failed: rc=%s (%d)\n", smtc_modem_return_code_to_str( rc ), rc );
+            }
         }
         HAL_DBG_TRACE_INFO( "LoRaWAN parameters:\n" );
 
