@@ -19,17 +19,22 @@ extern "C" {
 #define FIRMWARE_VERSION_MAJOR      1
 #define FIRMWARE_VERSION_MINOR      0
 #define FIRMWARE_VERSION_PATCH      0
-#define FIRMWARE_VERSION_BUILD      24
+#define FIRMWARE_VERSION_BUILD      25
 
-// Version string (e.g., "1.0.0-b24")
-#define FIRMWARE_VERSION_STRING     "1.0.0-b24"
+// Version string (e.g., "1.0.0-b25")
+#define FIRMWARE_VERSION_STRING     "1.0.0-b25"
 
 // Version features (changelog for this version)
-#define FIRMWARE_VERSION_FEATURES   "Derived ABP overwrites stored ABP keys"
+#define FIRMWARE_VERSION_FEATURES   "Derived ABP uses per-project DevAddr blocks"
 
 /*
  * Version History:
  * 
+ * v1.0.0-b25 (2026-05-19)
+ *   - CHANGED: Derived ABP DevAddr allocation treats each NetID as one 128-address client/project block
+ *   - CHANGED: Crew Tags use Group 2 addresses after the reserved Group 1 slice inside each project block
+ *   - ADDED: Config macros for NetID start/end and Group 1 block size so gateway filtering can use /25 project ranges
+ *
  * v1.0.0-b24 (2026-05-19)
  *   - CHANGED: ABP mode always replaces stored DevAddr/NwkSKey/AppSKey with deterministic derived values
  *   - CHANGED: Derived ABP values are persisted only when they differ from stored config to avoid repeated flash writes
