@@ -101,7 +101,7 @@ extern "C" {
  * REMEX_ABP_GROUP1_BLOCK_SIZE addresses are reserved for Group 1 local vessel
  * devices; Crew Tags are Group 2 and derive into the remaining addresses.
  */
-#define REMEX_ABP_MASTER_KEY "25D0D24B05080F8E56DED53947C11F5B"
+#define REMEX_ABP_MASTER_KEY "00007955000980007000400600002000"
 #define REMEX_ABP_NET_ID_START "E00110"
 #define REMEX_ABP_NET_ID_END   "E00110"
 #define REMEX_ABP_GROUP1_BLOCK_SIZE 16

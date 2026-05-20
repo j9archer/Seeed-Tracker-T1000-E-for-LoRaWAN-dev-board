@@ -24,7 +24,7 @@ This will:
 
 ### Method 1: UF2 Bootloader (Easiest)
 
-1. Double-press reset button to enter bootloader mode
+1. Hold down button and connect power cable to enter bootloader mode
 2. Drag and drop `t1000_e_tracker_vX.X.X.uf2` to the USB drive
 3. Device will automatically flash and reboot
 
