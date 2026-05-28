@@ -45,6 +45,7 @@ extern "C" {
  */
 
 #include <stdint.h>
+#include "default_config_settings.h"
 
 /*
  * -----------------------------------------------------------------------------
@@ -88,23 +89,7 @@ extern "C" {
 // #define LORAWAN_JOIN_EUI    "0000000000000000"
 // #define LORAWAN_APP_KEY     "EC6B1047B76B2C3C92CF9A128A5CCFEC"
 
-/*
- * Deterministic RemEX ABP defaults.
- *
- * REMEX_ABP_MASTER_KEY is the fleet secret used to derive DevAddr, NwkSKey,
- * and AppSKey from DevEUI. Override it in the build or replace this test value
- * before producing fleet firmware.
- *
- * Each Type 7 NetID maps to one 128-address DevAddr block. Allocate one or more
- * consecutive NetIDs to a client/project so gateways can filter the whole
- * project on /25 DevAddr boundaries. Inside each 128-address block, the first
- * REMEX_ABP_GROUP1_BLOCK_SIZE addresses are reserved for Group 1 local vessel
- * devices; Crew Tags are Group 2 and derive into the remaining addresses.
- */
-#define REMEX_ABP_MASTER_KEY "00007955000980007000400600002000"
-#define REMEX_ABP_NET_ID_START "E00110"
-#define REMEX_ABP_NET_ID_END   "E00110"
-#define REMEX_ABP_GROUP1_BLOCK_SIZE 16
+/* RemEX defaults and deterministic ABP derivation inputs live in default_config_settings.h. */
 
 /*
  * -----------------------------------------------------------------------------

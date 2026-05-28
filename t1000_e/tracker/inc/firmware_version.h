@@ -19,17 +19,57 @@ extern "C" {
 #define FIRMWARE_VERSION_MAJOR      1
 #define FIRMWARE_VERSION_MINOR      0
 #define FIRMWARE_VERSION_PATCH      0
-#define FIRMWARE_VERSION_BUILD      25
+#define FIRMWARE_VERSION_BUILD      35
 
-// Version string (e.g., "1.0.0-b25")
-#define FIRMWARE_VERSION_STRING     "1.0.0-b25"
+// Version string (e.g., "1.0.0-b35")
+#define FIRMWARE_VERSION_STRING     "1.0.0-b35"
 
 // Version features (changelog for this version)
-#define FIRMWARE_VERSION_FEATURES   "Derived ABP uses per-project DevAddr blocks"
+#define FIRMWARE_VERSION_FEATURES   "Make DevEUI immutable in firmware"
 
 /*
  * Version History:
  * 
+ * v1.0.0-b35 (2026-05-28)
+ *   - FIXED: Firmware never writes, clears, or replaces app_param DevEUI
+ *   - CHANGED: Config app / AT DevEUI setter is rejected; DevEUI is factory-provisioned read-only identity
+ *
+ * v1.0.0-b34 (2026-05-28)
+ *   - FIXED: LR11xx hardware UID is not accepted as a LoRaWAN DevEUI for deterministic ABP
+ *   - CHANGED: Invalid LR11xx UID-like DevEUI is cleared so the SenseCAP DevEUI must be entered/restored
+ *
+ * v1.0.0-b33 (2026-05-28)
+ *   - FIXED: ABP derivation falls back to the LR11xx chip UID when the modem secure-element DevEUI is empty
+ *   - ADDED: Visible modem-reset startup log for DevEUI, DevAddr, NwkSKey, and AppSKey
+ *
+ * v1.0.0-b32 (2026-05-28)
+ *   - FIXED: Derived ABP DevAddr/NwkSKey/AppSKey are prepared before BLE config app reads app_param
+ *   - CHANGED: LR11xx factory UID is mirrored into app_param DevEUI before deterministic ABP derivation
+ *
+ * v1.0.0-b31 (2026-05-27)
+ *   - ADDED: Routine on-charge/spare uplinks route on FPort 7 with event-state bit 0x04 set
+ *   - ADDED: MOB/SOS FPort 6 payloads preserve alert routing and carry on-charge metadata where available
+ *
+ * v1.0.0-b30 (2026-05-27)
+ *   - CHANGED: LinkCheck strong-margin reserve reduced from 15 dB to 10 dB before spending 5 dB per DR step
+ *
+ * v1.0.0-b29 (2026-05-26)
+ *   - ADDED: DevEUI-derived startup jitter before the first routine status uplink to spread charger-bank wakeups
+ *   - ADDED: DevEUI-phased periodic LinkCheck scheduling to avoid fleet-wide control-frame bunching
+ *   - ADDED: Missing LinkCheckAns retry ladder probes lower DRs without changing the normal FPort 5 uplink DR
+ *
+ * v1.0.0-b28 (2026-05-26)
+ *   - FIXED: Power-on status payload is not misclassified as SOS when battery byte contains bit 0x40
+ *   - CHANGED: Power-on status uplink uses normal routine scheduling on FPort 5
+ *
+ * v1.0.0-b27 (2026-05-26)
+ *   - FIXED: Missing LinkCheckAns is treated as inconclusive instead of weak RF, preventing false DR step-downs
+ *   - CHANGED: A stable BLE Minor hint can restore its configured DR when LinkCheck has not actually refined it
+ *
+ * v1.0.0-b26 (2026-05-26)
+ *   - CHANGED: Custom BLE routine uplinks use new Data IDs 0x27/0x28 with Major/Minor/RSSI records
+ *   - CHANGED: BLE scanning returned to passive mode for production beacon detection
+ *
  * v1.0.0-b25 (2026-05-19)
  *   - CHANGED: Derived ABP DevAddr allocation treats each NetID as one 128-address client/project block
  *   - CHANGED: Crew Tags use Group 2 addresses after the reserved Group 1 slice inside each project block
@@ -47,6 +87,7 @@ extern "C" {
  * v1.0.0-b22 (2026-05-15)
  *   - CHANGED: BLE movement detection uses strongest approved UUID beacon even when Minor is not 1..5
  *   - CHANGED: Minor 1..5 remains required for direct BLE DR changes; unconfigured Minors only reset stability/LinkCheck timing
+ *   - CHANGED: Minor 1..5 is interpreted as the proposed LoRaWAN DR, not an inverse RF-grade profile
  *
  * v1.0.0-b21 (2026-05-15)
  *   - FIXED: Strongest-beacon changes must repeat across scan sessions before resetting BLE DR baseline

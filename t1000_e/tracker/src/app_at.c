@@ -376,16 +376,9 @@ ATEerror_t AT_DevEUI_get(const char *param) {
 }
 
 ATEerror_t AT_DevEUI_set(const char *param) {
-    uint8_t devEui[8];
-    if ((Data_Analysis(param, devEui, 8) == -1) || (strlen(param) != 25)) {
-        return AT_PARAM_ERROR;
-    }
-    if(memcmp(&app_param.lora_info.DevEui[0], devEui, SE_EUI_SIZE)!= 0)
-    {
-        memcpy((uint8_t *)app_param.lora_info.DevEui, devEui, SE_EUI_SIZE);
-        check_save_param_type();
-    }
-    return AT_OK;
+    ( void ) param;
+    AT_PRINTF( "DevEUI is factory-provisioned and read-only" );
+    return AT_ERROR;
 }
 /*------------------------AT+DEUI=?\r\n-------------------------------------*/
 

@@ -76,6 +76,16 @@ static bool is_all_zero( const uint8_t* buf, size_t len )
     return true;
 }
 
+static bool remex_deveui_is_lr11xx_uid( const uint8_t dev_eui[8] )
+{
+    return ( dev_eui[0] == 0x00 ) && ( dev_eui[1] == 0x16 ) && ( dev_eui[2] == 0xC0 );
+}
+
+static bool remex_deveui_is_usable( const uint8_t dev_eui[8] )
+{
+    return !is_all_zero( dev_eui, SMTC_MODEM_EUI_LENGTH ) && !remex_deveui_is_lr11xx_uid( dev_eui );
+}
+
 static bool load_stored_deveui( uint8_t stack_id, uint8_t dev_eui[8] )
 {
     smtc_modem_return_code_t rc = smtc_modem_get_deveui( stack_id, dev_eui );
@@ -86,14 +96,17 @@ static bool load_stored_deveui( uint8_t stack_id, uint8_t dev_eui[8] )
         return false;
     }
 
-    if( is_all_zero( dev_eui, SMTC_MODEM_EUI_LENGTH ) )
+    if( remex_deveui_is_usable( dev_eui ) )
     {
-        HAL_DBG_TRACE_ERROR( "Stored DevEUI is empty; configure DevEUI before LoRaWAN activation\n" );
-        return false;
+        return true;
     }
 
-    memcpy1( app_param.lora_info.DevEui, dev_eui, sizeof( app_param.lora_info.DevEui ) );
-    return true;
+    if( remex_deveui_is_lr11xx_uid( dev_eui ) )
+    {
+        HAL_DBG_TRACE_ERROR( "Stored modem DevEUI looks like LR11xx UID, not SenseCAP DevEUI\n" );
+    }
+
+    return false;
 }
 
 void apps_modem_common_configure_lorawan_params( uint8_t stack_id )
@@ -109,6 +122,7 @@ void apps_modem_common_configure_lorawan_params( uint8_t stack_id )
     uint8_t app_key[16] = { 0 }; // can be change by user
     uint8_t app_s_key[16] = { 0 }; // can be change by user
     uint8_t nwk_s_key[16] = { 0 }; // can be change by user
+    bool config_changed = false;
 
     switch( app_param.lora_info.ActiveRegion )
     {
@@ -200,14 +214,30 @@ void apps_modem_common_configure_lorawan_params( uint8_t stack_id )
     memcpy1( app_s_key, app_param.lora_info.AppSKey, 16 );
     memcpy1( nwk_s_key, app_param.lora_info.NwkSKey, 16 );
 
-    if( is_all_zero( dev_eui, sizeof( dev_eui ) ) )
+    /*
+     * DevEUI is immutable factory identity. Never change app_param.DevEui here:
+     * ABP derivation may read it, and the modem may be configured to use it at
+     * runtime, but firmware/config app must not create, clear, or replace it.
+     * If the modem secure element is empty, fall back to the factory value
+     * already present in app_param. Do not use the LR11xx UID as DevEUI.
+     */
+    if( load_stored_deveui( stack_id, dev_eui ) )
     {
-        /*
-         * Identity comes from factory/device storage, not lorawan_key_config.h.
-         * If storage is empty, leave DevEUI empty so provisioning fails visibly
-         * instead of accidentally cloning a compile-time DevEUI onto many tags.
-         */
-        ( void ) load_stored_deveui( stack_id, dev_eui );
+    }
+    else
+    {
+        memcpy1( dev_eui, app_param.lora_info.DevEui, sizeof( dev_eui ) );
+    }
+
+    if( remex_deveui_is_lr11xx_uid( dev_eui ) )
+    {
+        HAL_DBG_TRACE_ERROR( "Configured DevEUI looks like LR11xx UID; refusing to derive ABP keys\n" );
+        memset( dev_eui, 0, sizeof( dev_eui ) );
+    }
+
+    if( !remex_deveui_is_usable( dev_eui ) )
+    {
+        HAL_DBG_TRACE_ERROR( "DevEUI is empty; configure DevEUI before LoRaWAN activation\n" );
     }
 
     if( activation_mode == ACTIVATION_MODE_ABP )
@@ -217,37 +247,45 @@ void apps_modem_common_configure_lorawan_params( uint8_t stack_id )
          * on boot and replace any old/manual ABP values left in FDS after flashing.
          * Persist only when values changed, avoiding repeated flash writes.
          */
-        if( !is_all_zero( dev_eui, sizeof( dev_eui ) ) &&
+        if( remex_deveui_is_usable( dev_eui ) &&
             remex_abp_derive_session( dev_eui, &dev_addr, nwk_s_key, app_s_key ) == true )
         {
-            bool abp_changed = false;
-
             if( app_param.lora_info.DevAddr != dev_addr )
             {
                 app_param.lora_info.DevAddr = dev_addr;
-                abp_changed = true;
+                config_changed = true;
             }
 
             if( memcmp( app_param.lora_info.NwkSKey, nwk_s_key, sizeof( app_param.lora_info.NwkSKey ) ) != 0 )
             {
                 memcpy1( app_param.lora_info.NwkSKey, nwk_s_key, sizeof( app_param.lora_info.NwkSKey ) );
-                abp_changed = true;
+                config_changed = true;
             }
 
             if( memcmp( app_param.lora_info.AppSKey, app_s_key, sizeof( app_param.lora_info.AppSKey ) ) != 0 )
             {
                 memcpy1( app_param.lora_info.AppSKey, app_s_key, sizeof( app_param.lora_info.AppSKey ) );
-                abp_changed = true;
+                config_changed = true;
             }
 
-            if( abp_changed && !write_current_param_config( ) )
-            {
-                HAL_DBG_TRACE_ERROR( "Failed to persist derived RemEX ABP session\n" );
-            }
         }
         else
         {
             HAL_DBG_TRACE_ERROR( "RemEX ABP derivation failed\n" );
+        }
+    }
+
+    if( config_changed && !write_current_param_config( ) )
+    {
+        HAL_DBG_TRACE_ERROR( "Failed to persist RemEX LoRaWAN config defaults\n" );
+    }
+
+    if( remex_deveui_is_usable( dev_eui ) )
+    {
+        rc = smtc_modem_set_deveui( stack_id, dev_eui );
+        if( rc != SMTC_MODEM_RC_OK )
+        {
+            HAL_DBG_TRACE_ERROR( "smtc_modem_set_deveui failed: rc=%s (%d)\n", smtc_modem_return_code_to_str( rc ), rc );
         }
     }
 
@@ -257,15 +295,6 @@ void apps_modem_common_configure_lorawan_params( uint8_t stack_id )
          * OTAA credentials are factory-flashed or entered through the config app.
          * Do not fill missing DevEUI/JoinEUI/AppKey from build-time constants.
          */
-        if( !is_all_zero( dev_eui, sizeof( dev_eui ) ) )
-        {
-            rc = smtc_modem_set_deveui( stack_id, dev_eui );
-            if( rc != SMTC_MODEM_RC_OK )
-            {
-                HAL_DBG_TRACE_ERROR( "smtc_modem_set_deveui failed: rc=%s (%d)\n", smtc_modem_return_code_to_str( rc ), rc );
-            }
-        }
-
         if( !is_all_zero( join_eui, sizeof( join_eui ) ) )
         {
             rc = smtc_modem_set_joineui( stack_id, join_eui );
@@ -307,6 +336,16 @@ void apps_modem_common_configure_lorawan_params( uint8_t stack_id )
     }
     else if( activation_mode == ACTIVATION_MODE_ABP )
     {
+        HAL_DBG_TRACE_INFO( "RemEX ABP session:\n" );
+        HAL_DBG_TRACE_ARRAY( "DevEUI", dev_eui, sizeof( dev_eui ) );
+        HAL_DBG_TRACE_INFO( "DevAddr: %02X%02X%02X%02X\n",
+                            ( unsigned )( ( dev_addr >> 24 ) & 0xFF ),
+                            ( unsigned )( ( dev_addr >> 16 ) & 0xFF ),
+                            ( unsigned )( ( dev_addr >> 8 ) & 0xFF ),
+                            ( unsigned )( dev_addr & 0xFF ) );
+        HAL_DBG_TRACE_ARRAY( "NwkSKey", nwk_s_key, sizeof( app_param.lora_info.NwkSKey ) );
+        HAL_DBG_TRACE_ARRAY( "AppSKey", app_s_key, sizeof( app_param.lora_info.AppSKey ) );
+
         rc = smtc_modem_set_devaddr( stack_id, dev_addr );
         if( rc != SMTC_MODEM_RC_OK )
         {

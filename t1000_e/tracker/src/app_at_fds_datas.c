@@ -16,6 +16,7 @@
 #include "app_at.h"
 #include "app_at_fds_datas.h"
 #include "app_config_param.h"
+#include "default_config_settings.h"
 
 static bool volatile m_fds_initialized;
 static fds_opt_status_t fds_opt_status = { 0 };
@@ -34,6 +35,8 @@ fds_record_t m_dummy_record[1] =
         .data.length_words = ( sizeof( app_param ) + 3) / sizeof( uint32_t )
     }
 };
+
+static bool remex_apply_crew_config_defaults_once( void );
 
 static void fds_evt_handler( fds_evt_t const *p_evt )
 {
@@ -172,6 +175,11 @@ void fds_init_write( void )
             }
         }
     }
+
+    if( remex_apply_crew_config_defaults_once( ) && !write_current_param_config( ) )
+    {
+        PRINTF( "Failed to persist RemEX Crew Tag config defaults\r\n" );
+    }
 }
 
 bool read_lfs_file( uint8_t file_name, uint8_t *data, uint8_t len ) 
@@ -277,6 +285,41 @@ bool write_current_param_config( void )
 {
     if ( !write_lfs_file( DEV_INFO_FILE ))
         return false;
+    return true;
+}
+
+static bool remex_apply_crew_config_defaults_once( void )
+{
+    if( app_param.param_version >= REMEX_CREW_CONFIG_VERSION )
+    {
+        return false;
+    }
+
+    /*
+     * Saved config survives a normal firmware flash. Apply the RemEX Crew Tag
+     * defaults before runtime globals are loaded, while preserving later user
+     * config changes until REMEX_CREW_CONFIG_VERSION is intentionally bumped.
+     */
+    app_param.lora_info.Platform       = REMEX_DEFAULT_PLATFORM;
+    app_param.lora_info.ActiveRegion  = REMEX_DEFAULT_ACTIVE_REGION;
+    app_param.lora_info.ChannelGroup  = REMEX_DEFAULT_CHANNEL_GROUP;
+    app_param.lora_info.ActivationType = REMEX_DEFAULT_ACTIVATION_TYPE;
+    app_param.lora_info.Retry         = REMEX_DEFAULT_RETRY;
+    app_param.lora_info.lr_ADR_en     = REMEX_DEFAULT_LORAWAN_ADR_ENABLED;
+    app_param.lora_info.lr_DR_min     = REMEX_DEFAULT_LORAWAN_DR_MIN;
+    app_param.lora_info.lr_DR_max     = REMEX_DEFAULT_LORAWAN_DR_MAX;
+
+    app_param.hardware_info.pos_strategy  = REMEX_DEFAULT_POSITION_STRATEGY;
+    app_param.hardware_info.pos_interval  = REMEX_DEFAULT_UPLINK_INTERVAL_MIN;
+    app_param.hardware_info.sos_mode      = REMEX_DEFAULT_SOS_MODE;
+    app_param.hardware_info.acc_en        = REMEX_DEFAULT_ACCELEROMETER_ENABLED;
+    app_param.hardware_info.gnss_overtime = REMEX_DEFAULT_GNSS_MAX_SCAN_TIME_S;
+    app_param.hardware_info.beac_overtime = REMEX_DEFAULT_IBEACON_SCAN_TIMEOUT_S;
+    app_param.hardware_info.beac_max      = REMEX_DEFAULT_IBEACON_SCAN_MAX;
+    app_param.hardware_info.uuid_num      = REMEX_DEFAULT_GROUP_UUID_LEN;
+    memset( app_param.hardware_info.beac_uuid, 0, sizeof( app_param.hardware_info.beac_uuid ) );
+
+    app_param.param_version = REMEX_CREW_CONFIG_VERSION;
     return true;
 }
 
