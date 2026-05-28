@@ -11,6 +11,7 @@ extern "C" {
  */
 #include <stdint.h>
 #include <stdbool.h>
+#include "crew_lorawan_ports.h"
 
 /*
  * -----------------------------------------------------------------------------
@@ -24,7 +25,7 @@ extern "C" {
 /*!
  * @brief LoRaWAN application port
  */
-#define LORAWAN_APP_PORT 5
+#define LORAWAN_APP_PORT CREW_ROUTINE_APP_PORT
 
 /*!
  * @brief User application data buffer size

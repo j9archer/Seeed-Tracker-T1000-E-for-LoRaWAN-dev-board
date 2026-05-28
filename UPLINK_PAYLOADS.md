@@ -2,21 +2,46 @@
 
 ## Overview
 
-The T1000-E tracker sends various payload types depending on the scan mode and sensors enabled. All uplinks use **FPort 2** and include a **Data ID** byte to identify the payload type.
+The T1000-E tracker sends various payload types depending on the scan mode and sensors enabled. Routine active tracker uplinks use **FPort 5** and include a **Data ID** byte to identify the payload type. Alert, uncertain, and MOB/PIW custom uplinks use **FPort 6** so the relay gateway shim can forward them without nth filtering, per MDR-018. Routine on-charge/spare tracker uplinks use **FPort 7** per MDR-019 so they can be filtered independently from active crew traffic.
+
+Routine startup/status traffic is FPort 5 when active and FPort 7 when on charge. The power-on payload contains a battery byte, not an event-state byte, so it must not be routed to FPort 6 just because the battery value contains the SOS bit pattern.
+
+## FPort Policy
+
+| FPort | Direction | Use | Shim policy |
+|-------|-----------|-----|-------------|
+| 0 | Uplink | LoRaWAN MAC-only tasks such as LinkCheckReq / DeviceTimeReq | Forward as MAC traffic |
+| 5 | Uplink | Routine tracker traffic, including on-board BLE/WiFi/GNSS telemetry | nth filtering allowed |
+| 6 | Uplink | Alert/pass-through traffic: uncertain, MOB/PIW, SOS, and event-bearing custom payloads | Forward every uplink |
+| 7 | Uplink | Routine on-charge/spare tracker traffic | Independent nth filtering allowed |
+| 10 | Downlink | Gateway/vessel position assistance | Downlink only |
+
+Routine/control scheduling uses deterministic DevEUI-derived jitter or phase where useful:
+
+- First routine power/status uplink after boot/join is delayed by a DevEUI-derived startup jitter to spread charger-bank wakeups.
+- Periodic LinkCheck scheduling is DevEUI-phased so tags do not all request validation on the same uplink count.
+- Missing LinkCheckAns retry probes can use lower probe DRs, but normal FPort 5 application uplinks keep their current BLE/LinkCheck-selected DR.
+- SOS, MOB, cancellation, and direct user alert traffic bypass routine startup jitter.
 
 ## Payload Types Summary
 
 | Data ID | Name | Min Size | Max Size | Description |
 |---------|------|----------|----------|-------------|
-| 0x1E | POWER | 1 byte | 1 byte | Power-on message |
-| 0x1F | GPS_SEN_ACC_BAT | 13 bytes | ~70 bytes | GNSS + sensors + accelerometer + battery |
-| 0x20 | WIFI_SEN_ACC_BAT | 14+ bytes | ~90 bytes | WiFi + sensors + accelerometer + battery |
-| 0x21 | BLE_SEN_ACC_BAT | 14+ bytes | ~90 bytes | BLE + sensors + accelerometer + battery |
-| 0x22 | GPS_SEN_BAT | 7 bytes | ~64 bytes | GNSS + sensors + battery |
-| 0x23 | WIFI_SEN_BAT | 8+ bytes | ~84 bytes | WiFi + sensors + battery |
-| 0x24 | BLE_SEN_BAT | 8+ bytes | ~84 bytes | BLE + sensors + battery |
-| 0x25 | SEN_ACC_BAT | 13 bytes | 13 bytes | Sensors + accelerometer + battery only |
-| 0x26 | SEN_BAT | 7 bytes | 7 bytes | Sensors + battery only |
+| 0x1E | POWER | 13 bytes | 13 bytes | Power-on/status message |
+| 0x1F | GPS_SEN_ACC_BAT | 14 bytes | ~71 bytes | GNSS + sensors + accelerometer + battery + location age |
+| 0x20 | WIFI_SEN_ACC_BAT | 15+ bytes | ~91 bytes | WiFi + sensors + accelerometer + battery + location age |
+| 0x21 | BLE_SEN_ACC_BAT | 15+ bytes | ~91 bytes | BLE + sensors + accelerometer + battery + location age |
+| 0x22 | GPS_SEN_BAT | 8 bytes | ~65 bytes | GNSS + sensors + battery + location age |
+| 0x23 | WIFI_SEN_BAT | 9+ bytes | ~85 bytes | WiFi + sensors + battery + location age |
+| 0x24 | BLE_SEN_BAT | 9+ bytes | ~85 bytes | BLE + sensors + battery + location age |
+| 0x25 | SEN_ACC_BAT | 14 bytes | 14 bytes | Sensors + accelerometer + battery + location age |
+| 0x26 | SEN_BAT | 8 bytes | 8 bytes | Sensors + battery + location age |
+| 0x27 | CUSTOM_BLE_SEN_ACC_BAT | 15+ bytes | ~65 bytes | Custom BLE Major/Minor/RSSI + sensors + accelerometer + battery + location age |
+| 0x28 | CUSTOM_BLE_SEN_BAT | 9+ bytes | ~59 bytes | Custom BLE Major/Minor/RSSI + sensors + battery + location age |
+
+On FPort 6, Data IDs `0x20`, `0x21`, and `0x22` are decoded using the custom alert/MOB layout below rather than the routine FPort 5 layouts.
+
+Routine FPort 5 and FPort 7 payloads append one final `Location Age` byte after the payload-specific fields. This is the MDR-018/MDR-019 confirmation signal for accepted GNSS or gateway/vessel assistance position. Alert FPort 6 payloads do not include this field because their location is carried directly by GNSS state when available.
 
 ---
 
@@ -34,6 +59,14 @@ All payloads with "SEN" include these fields after the Data ID:
 
 **Total: 7 bytes**
 
+### Routine Location Age Trailer
+
+All routine FPort 5 and FPort 7 payloads except the power-on message append this one-byte trailer:
+
+| Offset | Size | Field | Type | Description |
+|--------|------|-------|------|-------------|
+| final byte | 1 | Location Age | uint8 | Minutes since accepted GNSS/gateway position; `255` unknown, `254` saturated |
+
 #### Event State Flags
 
 The Event State byte is a bitfield containing various tracker status and trigger flags:
@@ -42,7 +75,7 @@ The Event State byte is a bitfield containing various tracker status and trigger
 |-----|-----|------|--------|-------------|
 | 0 | 0x01 | Reserved | 🔲 Draft | Reserved for future use |
 | 1 | 0x02 | Reserved | 🔲 Draft | Reserved for future use |
-| 2 | 0x04 | **On Charge** | 🔲 Draft | Device is charging (likely not attached to person) |
+| 2 | 0x04 | **On Charge** | ✅ Implemented | Device is charging (likely not attached to person); routine packets route on FPort 7 |
 | 3 | 0x08 | **Shock Detected** | 🔲 Draft | Shock/impact event detected since last uplink |
 | 4 | 0x10 | **Swim Mode** | 🔲 Draft | Special GNSS mode for water operation |
 | 5 | 0x20 | **GNSS Ready** | 🔲 Draft | Quick-fix ready (time sync + fresh almanac + recent position) |
@@ -60,6 +93,7 @@ Set when ALL conditions are met:
 - Detects vessel/shore charging
 - Enables different operational modes (e.g., almanac maintenance)
 - May indicate tracker not worn/attached to person
+- MDR-019 behavior routes routine on-charge packets on FPort 7 while keeping SOS/MOB traffic on FPort 6
 
 **Swim Mode (Bit 4):**
 - Specialized GNSS acquisition for water surface operation
@@ -99,15 +133,60 @@ Payloads with "ACC" add these fields after sensors:
 
 ## Detailed Payload Structures
 
+### FPort 6 Custom Alert / MOB Payloads
+
+These payloads are intentionally compact and use the FPort for routing priority. The shim should forward FPort 6 without nth filtering.
+
+#### 0x20: MOB_POSITION
+
+| Offset | Size | Field | Description |
+|--------|------|-------|-------------|
+| 0 | 1 | Data ID | 0x20 |
+| 1 | 1 | Mode + Flags | Low 7 bits: MOB/PIW mode; bit 7: on charge |
+| 2 | 4 | Latitude | int32 little-endian, degrees * 1e6 |
+| 6 | 4 | Longitude | int32 little-endian, degrees * 1e6 |
+| 10 | 1 | HDOP x10 | HDOP multiplied by 10 |
+| 11 | 1 | Quality Flags | Bit 0 fix valid, bit 1 quality OK, bit 2 on charge |
+| 12 | 1 | Battery | int8 battery percentage |
+
+#### 0x21: MOB_CANCELLED
+
+| Offset | Size | Field | Description |
+|--------|------|-------|-------------|
+| 0 | 1 | Data ID | 0x21 |
+| 1 | 2 | Elapsed Seconds | uint16 big-endian seconds since activation |
+| 3 | 1 | Battery | int8 battery percentage |
+| 4 | 1 | Flags | Optional; bit 0 on charge |
+
+#### 0x22: MOB_NO_FIX
+
+| Offset | Size | Field | Description |
+|--------|------|-------|-------------|
+| 0 | 1 | Data ID | 0x22 |
+| 1 | 1 | Mode + Flags | Low 7 bits: MOB/PIW mode; bit 7: on charge |
+| 2 | 2 | Elapsed Seconds | uint16 big-endian seconds since activation |
+| 4 | 1 | Battery | int8 battery percentage |
+
 ### 0x1E: POWER (Power-On Message)
 
-Sent once after device powers on or reboots.
+Sent once after device powers on or reboots. This is routine FPort 5 status traffic and may be delayed by startup jitter. It is not an alert, even when the battery byte contains bit `0x40`.
 
 | Byte | Field | Description |
 |------|-------|-------------|
 | 0 | Data ID | 0x1E |
+| 1 | Battery | Battery level, 0-100% |
+| 2 | Software Major | Board/software version major byte |
+| 3 | Software Minor | Board/software version minor byte |
+| 4 | Hardware Major | Board/hardware version major byte |
+| 5 | Hardware Minor | Board/hardware version minor byte |
+| 6 | Tracker Scan Type | Active scan strategy |
+| 7-8 | Periodic Interval | Uplink interval in minutes, little-endian uint16 |
+| 9 | Accelerometer Enabled | `1` enabled, `0` disabled |
+| 10 | SOS Mode | Button/SOS mode setting |
+| 11 | WiFi Scan Max | Max WiFi results |
+| 12 | BLE Scan Max | Max BLE results |
 
-**Total Size: 1 byte**
+**Total Size: 13 bytes**
 
 ---
 
@@ -215,11 +294,9 @@ BLE beacon scan results with sensor data, without accelerometer.
 
 **Note:** MAC addresses are stored in reverse byte order (memcpyr)
 
-**TODO - Optimization:** If using beacons with unique minor IDs, could reduce to:
-- 2 bytes: Minor ID (beacon identifier)
-- 1 byte: RSSI
-- **Savings: 4 bytes per beacon** (3-byte MAC prefix removed)
-- Alternative: Send last 3 bytes of MAC + RSSI = 4 bytes per beacon (3 bytes saved)
+**Custom firmware:** Uses Data IDs `0x27` and `0x28` instead of this stock-compatible `MAC + RSSI`
+layout. The custom layout sends `Major + Minor + RSSI` so the backend gets the beacon ID and DR
+hint directly without carrying the BLE MAC.
 
 **Example with 3 beacons:**
 - Header: 9 bytes
@@ -248,6 +325,45 @@ BLE beacon scan with full sensor suite including accelerometer.
 - **Total: 36 bytes**
 
 **Size Range: 14 bytes (no beacons) to ~90 bytes (max ~11 beacons)**
+
+---
+
+### 0x28: CUSTOM_BLE_SEN_BAT (Custom BLE + Sensors + Battery)
+
+Custom BLE beacon scan results with sensor data, without accelerometer. This is separated from
+stock firmware payload `0x24` so decoders can safely distinguish `Major/Minor/RSSI` from
+`MAC/RSSI`.
+
+| Offset | Size | Field | Description |
+|--------|------|-------|-------------|
+| 0 | 1 | Data ID | 0x28 |
+| 1 | 7 | Sensor Data | Event state, battery, temp, light |
+| 8 | 1 | Beacon Count | Number of BLE beacons (N) |
+| 9 | N x 5 | Beacon Records | N custom iBeacon records |
+
+**Custom iBeacon Record (5 bytes each):**
+
+| Offset | Size | Field | Description |
+|--------|------|-------|-------------|
+| 0 | 2 | Major | Beacon identifier using the `MNNNN` convention |
+| 2 | 2 | Minor | Installer proposed LoRaWAN DR, normally 1..5 |
+| 4 | 1 | RSSI | Signal strength (signed int8, dBm) |
+
+**Savings:** 2 bytes per beacon versus stock `MAC(6) + RSSI(1)`.
+
+---
+
+### 0x27: CUSTOM_BLE_SEN_ACC_BAT (Custom BLE + Sensors + Accelerometer + Battery)
+
+Custom BLE beacon scan results with full sensor suite including accelerometer. This mirrors `0x21`
+but uses the 5-byte custom iBeacon record from `0x28`.
+
+| Offset | Size | Field | Description |
+|--------|------|-------|-------------|
+| 0 | 1 | Data ID | 0x27 |
+| 1 | 13 | Sensor + Accelerometer Data | Event state, battery, temp, light, X/Y/Z acceleration |
+| 14 | 1 | Beacon Count | Number of BLE beacons (N) |
+| 15 | N x 5 | Beacon Records | N custom iBeacon records |
 
 ---
 
@@ -364,7 +480,7 @@ To minimize airtime in future versions, consider:
    - Light sensor logarithmic encoding
 
 3. **Optimize positioning payloads:**
-   - **BLE beacons:** Use minor ID (2 bytes) instead of full MAC (6 bytes) - saves 4 bytes/beacon
+   - **BLE beacons:** Use Major ID (2 bytes) instead of full MAC (6 bytes) - saves 4 bytes/beacon
    - **BLE scan count:** Configurable via downlink (1 for proximity, 3-5 for positioning, 5+ for indoor)
    - **WiFi:** Send only last 3 bytes of MAC if same OUI - saves 3 bytes/AP
    - **WiFi scan count:** Similar configurable parameter (1-3 for outdoor, 5+ for indoor)

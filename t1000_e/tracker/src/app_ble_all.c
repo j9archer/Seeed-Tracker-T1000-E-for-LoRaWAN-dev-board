@@ -68,7 +68,11 @@ static ble_gap_scan_params_t const m_scan_param =
 
 #define BLE_BEACON_BUF_MAX  16
 #define BLE_BEACON_SEND_MUM 5
+#define BLE_BEACON_UPLINK_RECORD_LEN 5
 #define BLE_SCAN_DEBUG_REJECT_LOG_MAX 8
+#define BLE_SCAN_DEBUG_NAME_LOG_MAX 8
+#define BLE_AD_TYPE_SHORT_LOCAL_NAME 0x08
+#define BLE_AD_TYPE_COMPLETE_LOCAL_NAME 0x09
 
 bool s_filter_flag = false;
 uint8_t ble_beacon_res_num = 0;
@@ -77,9 +81,11 @@ uint8_t ble_beacon_rssi_array[BLE_BEACON_BUF_MAX] = { 0 };
 uint8_t ble_uuid_filter_array[16] = { 0 };
 uint8_t ble_uuid_filter_num = 0;
 static bool s_ble_scanning = false;                                                     /**< Internal flag tracking if a BLE scan is active */
+static uint16_t s_ble_adv_reports = 0;
 static uint16_t s_ble_ibeacon_seen = 0;
 static uint16_t s_ble_approved_reports = 0;
 static uint8_t s_ble_rejected_uuid_logs = 0;
+static uint8_t s_ble_name_logs = 0;
 
 BLE_NUS_DEF(m_nus, NRF_SDH_BLE_TOTAL_LINK_COUNT);
 
@@ -107,6 +113,8 @@ static ble_uuid_t m_adv_uuids[] =
 static void advertising_start( void * p_erase_bonds );
 static void send_data_to_ble( uint8_t* buffer,uint16_t length );
 static bool buf_cmp_value( uint8_t *a, uint8_t *b, uint8_t len );
+static const uint8_t* ble_find_ibeacon_payload( const uint8_t* adv_data, uint16_t adv_len );
+static void ble_log_local_name_report( const uint8_t* adv_data, uint16_t adv_len, const uint8_t* mac, int8_t rssi );
 static bool beacon_uuid_approved( const uint8_t *uuid );
 static void ble_uuid_to_hex( const uint8_t *uuid, char *out, uint8_t out_len );
 static void ble_mac_to_hex( const uint8_t *mac, char *out, uint8_t out_len );
@@ -389,25 +397,20 @@ static void ble_evt_handler( ble_evt_t const * p_ble_evt, void * p_context )
     {
         case BLE_GAP_EVT_ADV_REPORT:
         {
+            s_ble_adv_reports++;
             if( m_scan.scan_buffer.len )
             {
-                uint8_t *p_data = &m_scan.scan_buffer.p_data[5];
-                uint8_t beacon_data_len = 0;
-                uint8_t beacon_data_type = 0;
-                uint16_t company_identifier = 0;
-                beacon_data_len = p_data[3];
-                beacon_data_type = p_data[2];
-                memcpy(( uint8_t * )( &company_identifier ), p_data, 2 );
-                if( beacon_data_type == BEACON_DATA_TYPE )
+                ble_log_local_name_report( m_scan.scan_buffer.p_data, m_scan.scan_buffer.len,
+                                           p_gap_evt->params.adv_report.peer_addr.addr,
+                                           p_gap_evt->params.adv_report.rssi );
+                const uint8_t *p_data = ble_find_ibeacon_payload( m_scan.scan_buffer.p_data, m_scan.scan_buffer.len );
+                if( p_data != NULL )
                 {
-                    if( company_identifier == COMPANY_IDENTIFIER )
-                    {
-                        if( beacon_data_len == BEACON_DATA_LEN )
-                        {
+                            uint16_t company_identifier = COMPANY_IDENTIFIER;
                             s_filter_flag = true;
                             s_ble_ibeacon_seen++;
 
-                            if( beacon_uuid_approved(( uint8_t * )p_data + 4 ) == false )
+                            if( beacon_uuid_approved(( const uint8_t * )p_data + 4 ) == false )
                             {
                                 if( s_ble_rejected_uuid_logs < BLE_SCAN_DEBUG_REJECT_LOG_MAX )
                                 {
@@ -464,8 +467,6 @@ static void ble_evt_handler( ble_evt_t const * p_ble_evt, void * p_context )
                                     break;
                                 }   
                             }
-                        }
-                    }
                 }
             }
         } break;
@@ -606,6 +607,99 @@ static bool buf_cmp_value( uint8_t *a, uint8_t *b, uint8_t len )
     return true;
 }
 
+static const uint8_t* ble_find_ibeacon_payload( const uint8_t* adv_data, uint16_t adv_len )
+{
+    uint16_t offset = 0;
+
+    while( offset < adv_len )
+    {
+        uint8_t field_len = adv_data[offset];
+
+        if( field_len == 0 )
+        {
+            break;
+        }
+
+        if(( offset + field_len ) >= adv_len )
+        {
+            break;
+        }
+
+        uint8_t field_type = adv_data[offset + 1];
+        const uint8_t* field_data = &adv_data[offset + 2];
+        uint8_t field_data_len = field_len - 1;
+
+        if(( field_type == BLE_GAP_AD_TYPE_MANUFACTURER_SPECIFIC_DATA ) &&
+           ( field_data_len >= ( 2 + 2 + BEACON_DATA_LEN )))
+        {
+            uint16_t company_identifier = 0;
+            memcpy(( uint8_t* )( &company_identifier ), field_data, 2 );
+
+            if(( company_identifier == COMPANY_IDENTIFIER ) &&
+               ( field_data[2] == BEACON_DATA_TYPE ) &&
+               ( field_data[3] == BEACON_DATA_LEN ))
+            {
+                return field_data;
+            }
+        }
+
+        offset += field_len + 1;
+    }
+
+    return NULL;
+}
+
+static void ble_log_local_name_report( const uint8_t* adv_data, uint16_t adv_len, const uint8_t* mac, int8_t rssi )
+{
+    uint16_t offset = 0;
+
+    if( s_ble_name_logs >= BLE_SCAN_DEBUG_NAME_LOG_MAX )
+    {
+        return;
+    }
+
+    while( offset < adv_len )
+    {
+        uint8_t field_len = adv_data[offset];
+
+        if( field_len == 0 )
+        {
+            break;
+        }
+
+        if(( offset + field_len ) >= adv_len )
+        {
+            break;
+        }
+
+        uint8_t field_type = adv_data[offset + 1];
+        const uint8_t* field_data = &adv_data[offset + 2];
+        uint8_t field_data_len = field_len - 1;
+
+        if((( field_type == BLE_AD_TYPE_SHORT_LOCAL_NAME ) || ( field_type == BLE_AD_TYPE_COMPLETE_LOCAL_NAME )) &&
+           ( field_data_len > 0 ))
+        {
+            char name[32];
+            char mac_str[18];
+            uint8_t copy_len = ( field_data_len < ( sizeof( name ) - 1 )) ? field_data_len : ( sizeof( name ) - 1 );
+
+            for( uint8_t i = 0; i < copy_len; i++ )
+            {
+                name[i] = (( field_data[i] >= 32 ) && ( field_data[i] <= 126 )) ? (char) field_data[i] : '.';
+            }
+            name[copy_len] = '\0';
+
+            ble_mac_to_hex( mac, mac_str, sizeof( mac_str ));
+            LOG_BLE( "local name mac=%s name=%s rssi=%d dBm type=0x%02X\n",
+                     mac_str, name, rssi, field_type );
+            s_ble_name_logs++;
+            return;
+        }
+
+        offset += field_len + 1;
+    }
+}
+
 static void ble_uuid_to_hex( const uint8_t *uuid, char *out, uint8_t out_len )
 {
     if(( uuid == NULL ) || ( out == NULL ) || ( out_len < 33 ))
@@ -671,9 +765,11 @@ bool ble_scan_start( void )
         memset(( uint8_t *)( &ble_beacon_buf[i] ), 0, sizeof( BleBeacons_t ));    
     }
     ble_beacon_res_num = 0;
+    s_ble_adv_reports = 0;
     s_ble_ibeacon_seen = 0;
     s_ble_approved_reports = 0;
     s_ble_rejected_uuid_logs = 0;
+    s_ble_name_logs = 0;
 
     err_code = nrf_ble_scan_params_set( &m_scan, &m_scan_param );
     APP_ERROR_CHECK( err_code );
@@ -682,9 +778,10 @@ bool ble_scan_start( void )
     APP_ERROR_CHECK( err_code );
 
     s_ble_scanning = true;
-    LOG_BLE( "scan START interval=%u window=%u duration=%u default_uuids=%u extra_uuid=%s\n",
+    LOG_BLE( "scan START interval=%u window=%u duration=%u active=%u default_uuids=%u extra_uuid=%s\n",
              (unsigned) APP_SCAN_INTERVAL, (unsigned) APP_SCAN_WINDOW, (unsigned) APP_SCAN_DURATION,
-             (unsigned) CREW_DR_BLE_UUID_WHITELIST_COUNT, ( ble_uuid_filter_num == 16 ) ? "yes" : "no" );
+             (unsigned) m_scan_param.active, (unsigned) CREW_DR_BLE_UUID_WHITELIST_COUNT,
+             ( ble_uuid_filter_num == 16 ) ? "yes" : "no" );
     if(( ble_uuid_filter_num != 0 ) && ( ble_uuid_filter_num != 16 ))
     {
         LOG_BLE( "extra UUID ignored: app value is %u byte(s), expected 16\n", ble_uuid_filter_num );
@@ -732,16 +829,22 @@ bool ble_get_results( uint8_t *result, uint8_t *size )
 
         for( uint8_t i = 0; i < beacon_num; i ++ )
         {
-            memcpyr( result + i * 7, ( uint8_t *)( &ble_beacon_buf[ble_beacon_rssi_array[i]].mac ), 6 );
-            memcpy( result + i * 7 + 6, &ble_beacon_buf[ble_beacon_rssi_array[i]].rssi_, 1 );
-            *size += 7;
+            uint8_t* record = result + ( i * BLE_BEACON_UPLINK_RECORD_LEN );
+
+            // Custom crew-tag BLE uplinks carry iBeacon identity, not the BLE MAC:
+            // Major is the beacon identifier, Minor is the installer DR hint, RSSI is signed dBm.
+            memcpy( record, ( uint8_t *)( &ble_beacon_buf[ble_beacon_rssi_array[i]].major ), 2 );
+            memcpy( record + 2, ( uint8_t *)( &ble_beacon_buf[ble_beacon_rssi_array[i]].minor ), 2 );
+            memcpy( record + 4, &ble_beacon_buf[ble_beacon_rssi_array[i]].rssi_, 1 );
+            *size += BLE_BEACON_UPLINK_RECORD_LEN;
         }
 
         // if( beacon_num < BLE_BEACON_SEND_MUM )
         // {
         //     for( uint8_t i = 0; i < ( BLE_BEACON_SEND_MUM - beacon_num ); i++ )
         //     {
-        //         memset( result + beacon_num * 7 + i * 7, 0xff, 7 );
+        //         memset( result + beacon_num * BLE_BEACON_UPLINK_RECORD_LEN + i * BLE_BEACON_UPLINK_RECORD_LEN,
+        //                 0xff, BLE_BEACON_UPLINK_RECORD_LEN );
         //         *size += 7;
         //     }
         // }
@@ -882,8 +985,9 @@ void ble_scan_stop( void )
 {
     nrf_ble_scan_stop( );
     s_ble_scanning = false;
-    LOG_BLE( "scan STOP iBeacon_reports=%u approved_reports=%u unique_approved=%u rejected_uuid_logs=%u\n",
-             s_ble_ibeacon_seen, s_ble_approved_reports, ble_beacon_res_num, s_ble_rejected_uuid_logs );
+    LOG_BLE( "scan STOP adv_reports=%u iBeacon_reports=%u approved_reports=%u unique_approved=%u rejected_uuid_logs=%u name_logs=%u\n",
+             s_ble_adv_reports, s_ble_ibeacon_seen, s_ble_approved_reports, ble_beacon_res_num,
+             s_ble_rejected_uuid_logs, s_ble_name_logs );
 }
 
 void ble_display_results( void )

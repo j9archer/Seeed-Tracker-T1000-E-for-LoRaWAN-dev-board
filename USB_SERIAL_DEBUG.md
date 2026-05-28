@@ -72,7 +72,7 @@ Features: Vessel GNSS assistance + charging almanac
 ###### ===== T1000-E Tracker example ==== ######
 
 Application parameters:
-  - LoRaWAN uplink Fport = 2
+  - LoRaWAN uplink Fport = 5
   - Confirmed uplink     = No
 ```
 

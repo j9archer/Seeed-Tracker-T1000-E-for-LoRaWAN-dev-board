@@ -4,6 +4,8 @@
 
 When the T1000-E is connected to a charger or docked, it automatically runs continuous GNSS tracking in the background. This keeps the almanac and ephemeris data fresh, ensuring fast Time-To-First-Fix (TTFF) when the device is later used for MOB/PIW tracking.
 
+Charger state also affects uplink routing and POB counting. Routine on-charge traffic uses the charger/spare FPort defined in `MDR-019`, while SOS/MOB traffic still uses the alert FPort and is annotated with charger state instead of being suppressed.
+
 ## How It Works
 
 ### Charge Detection

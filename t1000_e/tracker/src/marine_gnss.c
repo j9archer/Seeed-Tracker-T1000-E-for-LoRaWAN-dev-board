@@ -31,6 +31,8 @@
 #define MOB_TRACE_WARNING(...)  LOG_GNSS("WARN: " __VA_ARGS__)
 #define MOB_TRACE_ERROR(...)    LOG_GNSS("ERROR: " __VA_ARGS__)
 
+extern uint32_t ble_scan_duration;
+
 // NMEA debug macro - enabled for MOB burst and PIW Phase 1
 #define MOB_NMEA_DEBUG(mode, ...)  do { \
     if ((mode) == MOB_MODE_BURST || (mode) == MOB_MODE_PIW_PHASE1) { \
@@ -42,9 +44,9 @@
 #define DATA_ID_MOB_POSITION        0x20    // MOB position with quality
 #define DATA_ID_MOB_CANCELLED       0x21    // MOB cancelled (BLE found)
 #define DATA_ID_MOB_NO_FIX          0x22    // MOB no fix available
-
-// LoRaWAN port for MOB uplinks
-#define LORAWAN_MOB_PORT            2
+#define MOB_PAYLOAD_FLAG_ON_CHARGE  0x80    // ORed into mode byte for FPort 6 MOB records
+#define MOB_QUALITY_FLAG_ON_CHARGE  0x04    // Position quality flag metadata
+#define MOB_CANCEL_FLAG_ON_CHARGE   0x01    // Optional cancellation flags byte metadata
 
 /*
  * -----------------------------------------------------------------------------
@@ -352,10 +354,15 @@ static bool mob_send_position_with_policy( const gnss_fix_t *fix, bool quality_o
                                            app_mob_dr_policy_t policy )
 {
     mob_position_uplink_t payload;
+    bool on_charge = gateway_assistance_is_charging( );
     memset( &payload, 0, sizeof( payload ));
     
     payload.data_id = DATA_ID_MOB_POSITION;
     payload.event_state = (uint8_t)tracker_state.mode;
+    if( on_charge )
+    {
+        payload.event_state |= MOB_PAYLOAD_FLAG_ON_CHARGE;
+    }
     payload.latitude = fix->latitude;
     payload.longitude = fix->longitude;
     payload.hdop_x10 = (uint8_t)( fix->hdop * 10 );
@@ -364,12 +371,13 @@ static bool mob_send_position_with_policy( const gnss_fix_t *fix, bool quality_o
     payload.quality_flags = 0;
     if( fix->valid ) payload.quality_flags |= 0x01;
     if( quality_ok ) payload.quality_flags |= 0x02;
+    if( on_charge ) payload.quality_flags |= MOB_QUALITY_FLAG_ON_CHARGE;
     
     payload.battery = sensor_bat_sample( );
     
-    MOB_TRACE_INFO( "MOB uplink: lat=%ld, lon=%ld, HDOP=%.1f, qual=%02X, batt=%d%%\n",
+    MOB_TRACE_INFO( "MOB uplink: lat=%ld, lon=%ld, HDOP=%.1f, qual=%02X, batt=%d%%, on_charge=%u\n",
                    payload.latitude, payload.longitude, 
-                   fix->hdop, payload.quality_flags, payload.battery );
+                   fix->hdop, payload.quality_flags, payload.battery, on_charge ? 1 : 0 );
     
     if( tracker_state.mode == MOB_MODE_BURST && initial_burst_sent == false )
     {
@@ -383,14 +391,17 @@ static bool mob_send_position_with_policy( const gnss_fix_t *fix, bool quality_o
 
 static void mob_send_cancellation_uplink( void )
 {
-    uint8_t payload[4];
+    uint8_t payload[5];
+    bool on_charge = gateway_assistance_is_charging( );
+
     payload[0] = DATA_ID_MOB_CANCELLED;
     payload[1] = (uint8_t)( tracker_state.elapsed_s >> 8 );
     payload[2] = (uint8_t)( tracker_state.elapsed_s & 0xFF );
     payload[3] = sensor_bat_sample( );
+    payload[4] = on_charge ? MOB_CANCEL_FLAG_ON_CHARGE : 0x00;
     
-    MOB_TRACE_INFO( "MOB cancellation uplink: elapsed=%lu s, batt=%d%%\n",
-                   tracker_state.elapsed_s, payload[3] );
+    MOB_TRACE_INFO( "MOB cancellation uplink: elapsed=%lu s, batt=%d%%, on_charge=%u\n",
+                   tracker_state.elapsed_s, payload[3], on_charge ? 1 : 0 );
     
     app_send_mob_frame( payload, sizeof( payload ), true, APP_MOB_DR_PERSISTENCE );
 }
@@ -415,15 +426,21 @@ static void mob_send_no_fix_uplink( void )
 static void mob_send_no_fix_with_policy( app_mob_dr_policy_t policy )
 {
     uint8_t payload[5];
+    bool on_charge = gateway_assistance_is_charging( );
+
     payload[0] = DATA_ID_MOB_NO_FIX;
     payload[1] = (uint8_t)tracker_state.mode;
+    if( on_charge )
+    {
+        payload[1] |= MOB_PAYLOAD_FLAG_ON_CHARGE;
+    }
     payload[2] = (uint8_t)( tracker_state.elapsed_s >> 8 );
     payload[3] = (uint8_t)( tracker_state.elapsed_s & 0xFF );
     payload[4] = sensor_bat_sample( );
     
-    MOB_TRACE_INFO( "MOB no-fix uplink: mode=%s, elapsed=%lu s, batt=%d%%\n",
+    MOB_TRACE_INFO( "MOB no-fix uplink: mode=%s, elapsed=%lu s, batt=%d%%, on_charge=%u\n",
                    mob_tracker_mode_str( tracker_state.mode ),
-                   tracker_state.elapsed_s, payload[4] );
+                   tracker_state.elapsed_s, payload[4], on_charge ? 1 : 0 );
     
     if( tracker_state.mode == MOB_MODE_BURST && initial_burst_sent == false )
     {
@@ -564,11 +581,14 @@ static uint32_t mob_process_piw( void )
 
 static void mob_run_ble_scan( void )
 {
+    uint32_t scan_duration_s = ( ble_scan_duration > 0 ) ? ble_scan_duration : MOB_BLE_SCAN_DURATION_S;
+
     // Start BLE scan
     ble_scan_start( );
     
     // Wait for scan duration
-    hal_mcu_wait_ms( MOB_BLE_SCAN_DURATION_S * 1000 );
+    MOB_TRACE_INFO( "MOB BLE scan duration %lu s\n", scan_duration_s );
+    hal_mcu_wait_ms( scan_duration_s * 1000 );
     
     // Stop scan and check results
     ble_scan_stop( );

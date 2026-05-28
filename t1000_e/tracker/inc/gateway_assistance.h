@@ -28,13 +28,14 @@ extern "C" {
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "crew_lorawan_ports.h"
 
 /*
  * -----------------------------------------------------------------------------
  * --- PUBLIC MACROS -----------------------------------------------------------
  */
 
-#define GATEWAY_ASSISTANCE_PORT 10  // LoRaWAN port for gateway assistance messages
+/* LoRaWAN port for gateway assistance messages is defined in crew_lorawan_ports.h. */
 
 /*
  * -----------------------------------------------------------------------------
@@ -120,6 +121,13 @@ bool gateway_assistance_is_available(void);
  * @returns Assistance quality enumeration
  */
 assistance_quality_t gateway_assistance_get_quality(void);
+
+/*!
+ * @brief Get MDR-018 location age in minutes.
+ *
+ * @returns 0..254 minutes since accepted gateway/own position, or 255 if unknown.
+ */
+uint8_t gateway_assistance_get_location_age_min(void);
 
 /*!
  * @brief Get estimated current time based on cache and RTC

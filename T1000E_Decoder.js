@@ -6,12 +6,19 @@ function decodeUplink (input) {
     const decoded = {
         valid: true,
         err: 0,
+        fPort: fport,
         payload: bytesString,
         messages: []
     }
     if (fport === 199 || fport === 192) {
         decoded.messages.push({fport: fport, payload: bytesString})
         return { data: decoded }
+    }
+    if (fport === 6) {
+        const alertDecoded = decodeCrewAlertUplink(bytes, bytesString, fport)
+        if (alertDecoded.valid) {
+            return { data: alertDecoded }
+        }
     }
     let measurement = messageAnalyzed(originMessage)
     if (measurement.length === 0) {
@@ -36,8 +43,151 @@ function decodeUplink (input) {
             decoded.messages.push(elements)
         }
     }
+    if (fport === 7) {
+        annotateChargerPortMeasurements(decoded.messages)
+    }
     // decoded.messages = measurement
     return { data: decoded }
+}
+
+function annotateChargerPortMeasurements (messages) {
+    for (const message of messages) {
+        if (!Array.isArray(message)) {
+            continue
+        }
+        for (const element of message) {
+            if (element.type !== 'Event Status') {
+                continue
+            }
+            const eventFlags = element.value || element.measurementValue || { raw: 0 }
+            if (typeof eventFlags.raw !== 'number') {
+                eventFlags.raw = 0
+            }
+            eventFlags.onCharge = true
+            eventFlags.raw |= 0x04
+            element.value = eventFlags
+            element.measurementValue = eventFlags
+            if (element.motionId !== undefined) {
+                element.motionId = eventFlags.raw
+            }
+        }
+    }
+}
+
+function decodeCrewAlertUplink (bytes, bytesString, fport) {
+    const nowMs = Date.now()
+    const timestampSec = Math.floor(nowMs / 1000)
+    const dataId = u8(bytes, 0)
+    const decoded = {
+        valid: true,
+        err: 0,
+        payload: bytesString,
+        firmwareType: 'custom',
+        fPort: fport,
+        alertPort: true,
+        messages: []
+    }
+
+    if (dataId === 0x20 && bytes.length === 13) {
+        const modeRaw = u8(bytes, 1)
+        const qualityFlags = u8(bytes, 11)
+        const latitude = i32le(bytes, 2) / 1000000
+        const longitude = i32le(bytes, 6) / 1000000
+        decoded.mob = {
+            msgType: 0x04,
+            msgTypeName: 'MOB position',
+            modeRaw,
+            mode: modeRaw & 0x7F,
+            latitude,
+            longitude,
+            hdop: u8(bytes, 10) / 10,
+            qualityFlags,
+            fixValid: (qualityFlags & 0x01) !== 0,
+            qualityOk: (qualityFlags & 0x02) !== 0,
+            onCharge: ((modeRaw & 0x80) !== 0) || ((qualityFlags & 0x04) !== 0),
+            battery: s8(bytes, 12)
+        }
+        decoded.messages.push(crewAlertMeasurements(decoded.mob, timestampSec, nowMs))
+        return decoded
+    }
+
+    if (dataId === 0x21 && (bytes.length === 4 || bytes.length === 5)) {
+        const flags = bytes.length === 5 ? u8(bytes, 4) : 0
+        decoded.mob = {
+            msgType: 0x01,
+            msgTypeName: 'MOB cancelled',
+            elapsedS: u16be(bytes, 1),
+            flags,
+            onCharge: (flags & 0x01) !== 0,
+            battery: s8(bytes, 3),
+            approvedBeaconSeen: true
+        }
+        decoded.messages.push(crewAlertMeasurements(decoded.mob, timestampSec, nowMs))
+        return decoded
+    }
+
+    if (dataId === 0x22 && bytes.length === 5) {
+        const modeRaw = u8(bytes, 1)
+        decoded.mob = {
+            msgType: 0x02,
+            msgTypeName: 'MOB no fix',
+            modeRaw,
+            mode: modeRaw & 0x7F,
+            elapsedS: u16be(bytes, 2),
+            battery: s8(bytes, 4),
+            onCharge: (modeRaw & 0x80) !== 0,
+            gpsValid: false
+        }
+        decoded.messages.push(crewAlertMeasurements(decoded.mob, timestampSec, nowMs))
+        return decoded
+    }
+
+    decoded.valid = false
+    decoded.err = 1
+    decoded.errMessage = `Unsupported crew alert payload on fPort ${fport}`
+    return decoded
+}
+
+function crewAlertMeasurements (mob, collectTime, timestamp) {
+    const measurements = [
+        {
+            measurementId: '6000',
+            type: 'Crew Alert',
+            measureTime: collectTime,
+            timestamp: timestamp,
+            value: mob,
+            measurementValue: mob
+        },
+        {
+            measurementId: '3000',
+            type: 'Battery',
+            measureTime: collectTime,
+            timestamp: timestamp,
+            value: mob.battery,
+            measurementValue: mob.battery
+        }
+    ]
+
+    if (mob.latitude !== undefined && mob.longitude !== undefined) {
+        measurements.push({
+            measurementId: '4198',
+            type: 'GNSS Latitude',
+            measureTime: collectTime,
+            timestamp: timestamp,
+            value: mob.latitude,
+            measurementValue: mob.latitude
+        })
+        measurements.push({
+            measurementId: '4197',
+            type: 'GNSS Longitude',
+            measureTime: collectTime,
+            timestamp: timestamp,
+            value: mob.longitude,
+            measurementValue: mob.longitude
+        })
+    }
+
+    return measurements
 }
 
 function messageAnalyzed (messageValue) {
@@ -80,6 +230,9 @@ function unpack (messageValue) {
                 break
             case '1F':
                 packageLen = 42
+                if (remainMessage.length === packageLen + 2) {
+                    packageLen += 2
+                }
                 if (remainMessage.length < packageLen) {
                     return frameArray
                 }
@@ -92,6 +245,9 @@ function unpack (messageValue) {
             case '20':
                 scanCount = parseInt(remainMessage.substring(26, 28), 16)
                 packageLen = (21 + (scanCount - 1) * 7) * 2
+                if (remainMessage.length === packageLen + 2) {
+                    packageLen += 2
+                }
                 if (remainMessage.length < packageLen) {
                     return frameArray
                 }
@@ -104,6 +260,9 @@ function unpack (messageValue) {
             case '21':
                 scanCount = parseInt(remainMessage.substring(26, 28), 16)
                 packageLen = (21 + (scanCount - 1) * 7) * 2
+                if (remainMessage.length === packageLen + 2) {
+                    packageLen += 2
+                }
                 if (remainMessage.length < packageLen) {
                     return frameArray
                 }
@@ -115,6 +274,9 @@ function unpack (messageValue) {
                 break
             case '22':
                 packageLen = 30
+                if (remainMessage.length === packageLen + 2) {
+                    packageLen += 2
+                }
                 if (remainMessage.length < packageLen) {
                     // Some firmwares can send a short 0x22 frame with only
                     // event/battery/temp (5 bytes total including dataId).
@@ -134,6 +296,9 @@ function unpack (messageValue) {
             case '23':
                 scanCount = parseInt(remainMessage.substring(14, 16), 16)
                 packageLen = (15 + (scanCount - 1) * 7) * 2
+                if (remainMessage.length === packageLen + 2) {
+                    packageLen += 2
+                }
                 if (remainMessage.length < packageLen) {
                     return frameArray
                 }
@@ -146,6 +311,9 @@ function unpack (messageValue) {
             case '24':
                 scanCount = parseInt(remainMessage.substring(14, 16), 16)
                 packageLen = (15 + (scanCount - 1) * 7) * 2
+                if (remainMessage.length === packageLen + 2) {
+                    packageLen += 2
+                }
                 if (remainMessage.length < packageLen) {
                     return frameArray
                 }
@@ -157,6 +325,9 @@ function unpack (messageValue) {
                 break
             case '25':
                 packageLen = 26
+                if (remainMessage.length === packageLen + 2) {
+                    packageLen += 2
+                }
                 if (remainMessage.length < packageLen) {
                     return frameArray
                 }
@@ -168,6 +339,41 @@ function unpack (messageValue) {
                 break
             case '26':
                 packageLen = 14
+                if (remainMessage.length === packageLen + 2) {
+                    packageLen += 2
+                }
+                if (remainMessage.length < packageLen) {
+                    return frameArray
+                }
+                dataValue = remainMessage.substring(2, packageLen)
+                messageValue = remainMessage.substring(packageLen)
+                dataObj = {
+                    'dataId': dataId, 'dataValue': dataValue
+                }
+                break
+            case '27':
+                scanCount = parseInt(remainMessage.substring(26, 28), 16)
+                // Custom BLE+accel frame: ID/header/count is 14 bytes, each iBeacon record is 5 bytes.
+                packageLen = (14 + (scanCount * 5)) * 2
+                if (remainMessage.length === packageLen + 2) {
+                    packageLen += 2
+                }
+                if (remainMessage.length < packageLen) {
+                    return frameArray
+                }
+                dataValue = remainMessage.substring(2, packageLen)
+                messageValue = remainMessage.substring(packageLen)
+                dataObj = {
+                    'dataId': dataId, 'dataValue': dataValue
+                }
+                break
+            case '28':
+                scanCount = parseInt(remainMessage.substring(14, 16), 16)
+                // Custom BLE frame: ID/header/count is 8 bytes, each iBeacon record is 5 bytes.
+                packageLen = (8 + (scanCount * 5)) * 2
+                if (remainMessage.length === packageLen + 2) {
+                    packageLen += 2
+                }
                 if (remainMessage.length < packageLen) {
                     return frameArray
                 }
@@ -240,11 +446,14 @@ function deserialize (dataId, dataValue) {
                 measurementValue: this.getSensorValue(dataValue.substring(32, 40), 1000000),
                 motionId: this.getMotionId(dataValue.substring(0, 2))
             })
+            addLocationAgeMeasurement(measurementArray, dataValue, 40, collectTime, timestamp)
             break
         case '20':
             collectTime = timestampSec
             measurementArray = this.getT1000EUplinkHeaderWithSensorAnd3Axis(dataValue, collectTime, 32, timestamp)
             scanMax = this.getInt(dataValue.substring(24, 26))
+            const wifiAccExpectedLen = 26 + (scanMax * 14)
+            const wifiAccScanEnd = locationAgeFromTail(dataValue, wifiAccExpectedLen) === null ? dataValue.length : dataValue.length - 2
             if (!scanMax || scanMax === 0) {
                 break
             }
@@ -253,27 +462,31 @@ function deserialize (dataId, dataValue) {
                 type: 'Wi-Fi Scan',
                 measureTime: collectTime,
                 timestamp: timestamp,
-                value: this.getMacAndRssiObj(dataValue.substring(26)),
-                measurementValue: this.getMacAndRssiObj(dataValue.substring(26)),
+                value: this.getMacAndRssiObj(dataValue.substring(26, wifiAccScanEnd)),
+                measurementValue: this.getMacAndRssiObj(dataValue.substring(26, wifiAccScanEnd)),
                 motionId: this.getMotionId(dataValue.substring(0, 2))
             })
+            addLocationAgeMeasurement(measurementArray, dataValue, wifiAccExpectedLen, collectTime, timestamp)
             break
         case '21':
             collectTime = timestampSec
             measurementArray = this.getT1000EUplinkHeaderWithSensorAnd3Axis(dataValue, collectTime, 33, timestamp)
             scanMax = this.getInt(dataValue.substring(24, 26))
+            const bleAccExpectedLen = 26 + (scanMax * 14)
+            const bleAccScanEnd = locationAgeFromTail(dataValue, bleAccExpectedLen) === null ? dataValue.length : dataValue.length - 2
             if (!scanMax || scanMax === 0) {
                 break
             }
+            const stockBleAccScan = this.getMacAndRssiObj(dataValue.substring(26, bleAccScanEnd))
             measurementArray.push({
                 measurementId: '5002',
                 type: 'BLE Scan',
                 measureTime: collectTime,
                 timestamp: timestamp,
-                value: this.getMacAndRssiObj(dataValue.substring(26)),
-                measurementValue: this.getMacAndRssiObj(dataValue.substring(26)),
+                value: stockBleAccScan,
                 motionId: this.getMotionId(dataValue.substring(0, 2))
             })
+            addLocationAgeMeasurement(measurementArray, dataValue, bleAccExpectedLen, collectTime, timestamp)
             break
         case '22':
             collectTime = timestampSec
@@ -302,11 +515,14 @@ function deserialize (dataId, dataValue) {
                     motionId: this.getMotionId(dataValue.substring(0, 2))
                 })
             }
+            addLocationAgeMeasurement(measurementArray, dataValue, 28, collectTime, timestamp)
             break
         case '23':
             collectTime = timestampSec
             measurementArray = this.getT1000EUplinkHeaderWithSensor(dataValue, collectTime, 35, timestamp)
             scanMax = this.getInt(dataValue.substring(12, 14))
+            const wifiExpectedLen = 14 + (scanMax * 14)
+            const wifiScanEnd = locationAgeFromTail(dataValue, wifiExpectedLen) === null ? dataValue.length : dataValue.length - 2
             if (!scanMax || scanMax === 0) {
                 break
             }
@@ -315,35 +531,81 @@ function deserialize (dataId, dataValue) {
                 type: 'Wi-Fi Scan',
                 measureTime: collectTime,
                 timestamp: timestamp,
-                value: this.getMacAndRssiObj(dataValue.substring(14)),
-                measurementValue: this.getMacAndRssiObj(dataValue.substring(14)),
+                value: this.getMacAndRssiObj(dataValue.substring(14, wifiScanEnd)),
+                measurementValue: this.getMacAndRssiObj(dataValue.substring(14, wifiScanEnd)),
                 motionId: this.getMotionId(dataValue.substring(0, 2))
             })
+            addLocationAgeMeasurement(measurementArray, dataValue, wifiExpectedLen, collectTime, timestamp)
             break
         case '24':
             collectTime = timestampSec
             measurementArray = this.getT1000EUplinkHeaderWithSensor(dataValue, collectTime, 36, timestamp)
             scanMax = this.getInt(dataValue.substring(12, 14))
+            const bleExpectedLen = 14 + (scanMax * 14)
+            const bleScanEnd = locationAgeFromTail(dataValue, bleExpectedLen) === null ? dataValue.length : dataValue.length - 2
             if (!scanMax || scanMax === 0) {
                 break
             }
+            const stockBleScan = this.getMacAndRssiObj(dataValue.substring(14, bleScanEnd))
             measurementArray.push({
                 measurementId: '5002',
                 type: 'BLE Scan',
                 measureTime: collectTime,
                 timestamp: timestamp,
-                value: this.getMacAndRssiObj(dataValue.substring(14)),
-                measurementValue: this.getMacAndRssiObj(dataValue.substring(14)),
+                value: stockBleScan,
                 motionId: this.getMotionId(dataValue.substring(0, 2))
             })
+            addLocationAgeMeasurement(measurementArray, dataValue, bleExpectedLen, collectTime, timestamp)
             break
         case '25':
             collectTime = timestampSec
             measurementArray = this.getT1000EUplinkHeaderWithSensorAnd3Axis(dataValue, collectTime, 37, timestamp)
+            addLocationAgeMeasurement(measurementArray, dataValue, 24, collectTime, timestamp)
             break
         case '26':
             collectTime = timestampSec
             measurementArray = this.getT1000EUplinkHeaderWithSensor(dataValue, collectTime, 38, timestamp)
+            addLocationAgeMeasurement(measurementArray, dataValue, 12, collectTime, timestamp)
+            break
+        case '27':
+            collectTime = timestampSec
+            measurementArray = this.getT1000EUplinkHeaderWithSensorAnd3Axis(dataValue, collectTime, 39, timestamp)
+            scanMax = this.getInt(dataValue.substring(24, 26))
+            const customBleAccExpectedLen = 26 + (scanMax * 10)
+            const customBleAccScanEnd = locationAgeFromTail(dataValue, customBleAccExpectedLen) === null ? dataValue.length : dataValue.length - 2
+            if (!scanMax || scanMax === 0) {
+                break
+            }
+            const customBleAccScan = this.getIBeaconAndRssiObj(dataValue.substring(26, customBleAccScanEnd))
+            measurementArray.push({
+                measurementId: '5002',
+                type: 'BLE Scan',
+                measureTime: collectTime,
+                timestamp: timestamp,
+                measurementValue: customBleAccScan,
+                motionId: this.getMotionId(dataValue.substring(0, 2))
+            })
+            addLocationAgeMeasurement(measurementArray, dataValue, customBleAccExpectedLen, collectTime, timestamp)
+            break
+        case '28':
+            collectTime = timestampSec
+            measurementArray = this.getT1000EUplinkHeaderWithSensor(dataValue, collectTime, 40, timestamp)
+            scanMax = this.getInt(dataValue.substring(12, 14))
+            const customBleExpectedLen = 14 + (scanMax * 10)
+            const customBleScanEnd = locationAgeFromTail(dataValue, customBleExpectedLen) === null ? dataValue.length : dataValue.length - 2
+            if (!scanMax || scanMax === 0) {
+                break
+            }
+            const customBleScan = this.getIBeaconAndRssiObj(dataValue.substring(14, customBleScanEnd))
+            measurementArray.push({
+                measurementId: '5002',
+                type: 'BLE Scan',
+                measureTime: collectTime,
+                timestamp: timestamp,
+                measurementValue: customBleScan,
+                motionId: this.getMotionId(dataValue.substring(0, 2))
+            })
+            addLocationAgeMeasurement(measurementArray, dataValue, customBleExpectedLen, collectTime, timestamp)
             break
     }
     return measurementArray
@@ -471,6 +733,49 @@ function getShardFlag (str) {
 function getBattery (batteryStr) {
     return loraWANV2DataFormat(batteryStr)
 }
+
+function locationAgeFromTail (dataValue, expectedNoAgeHexLen) {
+    if (dataValue.length === expectedNoAgeHexLen + 2) {
+        return getInt(dataValue.substring(expectedNoAgeHexLen, expectedNoAgeHexLen + 2))
+    }
+    return null
+}
+
+function addLocationAgeMeasurement (measurementArray, dataValue, expectedNoAgeHexLen, collectTime, timestamp) {
+    const locationAgeMin = locationAgeFromTail(dataValue, expectedNoAgeHexLen)
+    if (locationAgeMin === null) {
+        return
+    }
+    measurementArray.push({
+        measurementId: '6001',
+        type: 'Location Age',
+        measureTime: collectTime,
+        timestamp: timestamp,
+        value: locationAgeMin,
+        measurementValue: locationAgeMin
+    })
+}
+
+function u8 (bytes, offset) {
+    return bytes[offset] & 0xFF
+}
+
+function s8 (bytes, offset) {
+    const value = u8(bytes, offset)
+    return value > 127 ? value - 256 : value
+}
+
+function u16be (bytes, offset) {
+    return (u8(bytes, offset) << 8) | u8(bytes, offset + 1)
+}
+
+function i32le (bytes, offset) {
+    return (u8(bytes, offset) |
+        (u8(bytes, offset + 1) << 8) |
+        (u8(bytes, offset + 2) << 16) |
+        (u8(bytes, offset + 3) << 24))
+}
+
 function getSoftVersion (softVersion) {
     return `${loraWANV2DataFormat(softVersion.substring(0, 2))}.${loraWANV2DataFormat(softVersion.substring(2, 4))}`
 }
@@ -572,6 +877,24 @@ function getMacAndRssiObj (pair) {
     return pairs
 }
 
+function getIBeaconAndRssiObj (pair) {
+    let pairs = []
+    // Custom RemEX firmware uses 5-byte BLE records:
+    // major(2) identifies the vessel beacon, minor(2) is the proposed DR, rssi(1) is signed dBm.
+    if (pair.length % 10 === 0) {
+        for (let i = 0; i < pair.length; i += 10) {
+            // Keep the vessel BLE tag ID as a fixed-width decimal string.
+            // RemEX Node-RED vessel matching uses this ID directly, so 1234 must
+            // decode as "01234" rather than numeric 1234.
+            let major = String(getInt(pair.substring(i, i + 4))).padStart(5, '0')
+            let minor = getInt(pair.substring(i + 4, i + 8))
+            let rssi = getInt8RSSI(pair.substring(i + 8, i + 10))
+            pairs.push({major: major, minor: minor, rssi: rssi})
+        }
+    }
+    return pairs
+}
+
 function getMacAddress (str) {
     if (str.toLowerCase() === 'ffffffffffff') {
         return null
@@ -601,7 +924,6 @@ function getInt (str) {
 }
 
 function getEventStatus (str) {
-    // return getInt(str)
     let bitStr = getByteArray(str)
     let bitArr = []
     for (let i = 0; i < bitStr.length; i++) {
@@ -615,22 +937,22 @@ function getEventStatus (str) {
         }
         switch (i){
             case 0:
-                event.push({id:1, eventName:"Start moving event."})
+                event.push({id:1, eventName:"Reserved bit 0."})
                 break
             case 1:
-                event.push({id:2, eventName:"End movement event."})
+                event.push({id:2, eventName:"Reserved bit 1."})
                 break
             case 2:
-                event.push({id:3, eventName:"Motionless event."})
+                event.push({id:3, eventName:"On charge."})
                 break
             case 3:
                 event.push({id:4, eventName:"Shock event."})
                 break
             case 4:
-                event.push({id:5, eventName:"Temperature event."})
+                event.push({id:5, eventName:"Swim mode."})
                 break
             case 5:
-                event.push({id:6, eventName:"Light event."})
+                event.push({id:6, eventName:"GNSS ready."})
                 break
             case 6:
                 event.push({id:7, eventName:"SOS event."})
@@ -641,6 +963,19 @@ function getEventStatus (str) {
         }
     }
     return event
+}
+
+function getEventFlags (str) {
+    const value = getInt(str)
+    return {
+        raw: value,
+        onCharge: (value & 0x04) !== 0,
+        shockDetected: (value & 0x08) !== 0,
+        swimMode: (value & 0x10) !== 0,
+        gnssReady: (value & 0x20) !== 0,
+        sosActive: (value & 0x40) !== 0,
+        userTriggered: (value & 0x80) !== 0
+    }
 }
 
 function getByteArray (str) {
@@ -741,17 +1076,18 @@ function getT1000EUplinkHeaderWithSensor (dataValue, collectTime, dataId, timest
 }
 
 function getT1000EUplinkHeader (dataValue, collectTime, dataId, timestamp) {
-    let eventList = this.getEventStatus(dataValue.substring(0, 2))
+    const eventStateHex = dataValue.substring(0, 2)
+    let eventFlags = this.getEventFlags(eventStateHex)
     let measurementArray = []
-    const motionId = this.getMotionId(dataValue.substring(0, 2))
+    const motionId = this.getMotionId(eventStateHex)
     // Event Status (use 4200 as measurementId per target schema)
     measurementArray.push({
         measurementId: '4200',
         type: 'Event Status',
         measureTime: collectTime,
         timestamp: timestamp,
-        value: eventList,
-        measurementValue: eventList,
+        value: eventFlags,
+        measurementValue: eventFlags,
         motionId
     })
     // Battery

@@ -18,6 +18,7 @@ extern "C" {
 
 #define APP_USER_SOS_NUM_MAX    30
 
+#define TRACKER_STATE_BIT3_ON_CHARGE 0x04
 #define TRACKER_STATE_BIT7_SOS      0x40
 #define TRACKER_STATE_BIT8_USER     0x80
 

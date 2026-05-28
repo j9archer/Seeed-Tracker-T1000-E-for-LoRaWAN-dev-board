@@ -60,7 +60,7 @@ void app_lora_packet_power_on_uplink( void )
 
     app_lora_packet_len = 13;
 
-    app_send_frame( app_lora_packet_buffer, app_lora_packet_len, false, true );
+    app_send_frame( app_lora_packet_buffer, app_lora_packet_len, false, false );
 }
 
 void app_lora_packet_downlink_decode( uint8_t *buf, uint8_t len )

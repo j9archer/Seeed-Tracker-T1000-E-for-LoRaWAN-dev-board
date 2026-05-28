@@ -169,6 +169,22 @@ assistance_quality_t gateway_assistance_get_quality(void)
     }
 }
 
+uint8_t gateway_assistance_get_location_age_min(void)
+{
+    if (!position_cache.valid) {
+        return 255;
+    }
+
+    uint32_t current_rtc = hal_rtc_get_time_s();
+    uint32_t age_minutes = (current_rtc - position_cache.rtc_at_receipt) / 60;
+
+    if (age_minutes >= 255) {
+        return 254;
+    }
+
+    return (uint8_t)age_minutes;
+}
+
 uint32_t gateway_assistance_get_estimated_time(void)
 {
     if (!position_cache.time_synced) {
@@ -215,8 +231,11 @@ uint32_t gateway_assistance_get_recommended_scan_duration(void)
 
 bool gateway_assistance_is_charging(void)
 {
-    // Check if USB/charger is connected
-    return (hal_gpio_get_value(CHARGER_ADC_DET) != 0);
+    bool charger_inserted = (hal_gpio_get_value(CHARGER_ADC_DET) != 0);
+    bool charge_active = (hal_gpio_get_value(CHARGER_CHRG) == 0);
+    bool charge_done = (hal_gpio_get_value(CHARGER_DONE) == 0);
+
+    return charger_inserted || charge_active || charge_done;
 }
 
 bool gateway_assistance_needs_almanac_maintenance(uint32_t days_threshold)
