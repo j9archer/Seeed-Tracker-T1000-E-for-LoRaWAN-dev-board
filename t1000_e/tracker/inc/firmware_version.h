@@ -19,17 +19,62 @@ extern "C" {
 #define FIRMWARE_VERSION_MAJOR      1
 #define FIRMWARE_VERSION_MINOR      0
 #define FIRMWARE_VERSION_PATCH      0
-#define FIRMWARE_VERSION_BUILD      35
+#define FIRMWARE_VERSION_BUILD      49
 
-// Version string (e.g., "1.0.0-b35")
-#define FIRMWARE_VERSION_STRING     "1.0.0-b35"
+// Version string (e.g., "1.0.0-b49")
+#define FIRMWARE_VERSION_STRING     "1.0.0-b49"
 
 // Version features (changelog for this version)
-#define FIRMWARE_VERSION_FEATURES   "Make DevEUI immutable in firmware"
+#define FIRMWARE_VERSION_FEATURES   "Restore production scan interval"
 
 /*
  * Version History:
  * 
+ * v1.0.0-b49 (2026-05-30)
+ *   - CHANGED: Removed WiFi test override so configured default uplink interval returns to 1 minute
+ *   - REMOVED: Hardcoded temporary GNSS PAIR600 test position injection
+ *
+ * v1.0.0-b48 (2026-05-30)
+ *   - ADDED: WiFi logs include MAC/channel/type/RSSI details for rejected local-admin and mobile AP results
+ *
+ * v1.0.0-b47 (2026-05-30)
+ *   - CHANGED: WiFi scans primary channels 1/6/11 plus last fixed AP channel before scanning other channels
+ *   - CHANGED: If the primary WiFi channel set returns zero raw results, the same scan cycle checks channels 2/3/5/7/8/9/10/12/13
+ *
+ * v1.0.0-b46 (2026-05-30)
+ *   - CHANGED: WiFi provisional mobile/random-only hits raise the next scan to 2 results instead of 3
+ *   - CHANGED: Any accepted fixed/global WiFi result drops the next scan directly back to 1 result
+ *
+ * v1.0.0-b45 (2026-05-29)
+ *   - CHANGED: Randomized/mobile-only WiFi hits are accepted provisionally and raise the next scan effort
+ *   - CHANGED: WiFi no longer performs immediate same-cycle retry; capped failed scans fall through to fallback methods
+ *
+ * v1.0.0-b44 (2026-05-29)
+ *   - CHANGED: WiFi scan filters locally administered/randomized MAC addresses before accepting a result
+ *   - CHANGED: WiFi retry also triggers when the fast result is a filtered local-admin MAC
+ *
+ * v1.0.0-b43 (2026-05-29)
+ *   - CHANGED: WiFi scan retries with three raw results when the fast scan only finds mobile APs
+ *   - ADDED: WiFi logs include raw result count, mobile AP filtering, origin, and RSSI validity
+ *
+ * v1.0.0-b42 (2026-05-29)
+ *   - CHANGED: Test firmware forces tracker periodic interval to 20 seconds after config load
+ *
+ * v1.0.0-b41 (2026-05-29)
+ *   - CHANGED: LR11xx WiFi scan requests one result while preserving the current three-record uplink shape
+ *
+ * v1.0.0-b40 (2026-05-29)
+ *   - CHANGED: 5-second startup serial delay now runs before version logging for all scan strategies
+ *
+ * v1.0.0-b39 (2026-05-29)
+ *   - FIXED: WiFi scan nAh/uAh estimate uses 64-bit math before division
+ *
+ * v1.0.0-b38 (2026-05-29)
+ *   - CHANGED: Trial WiFi scan duration reduced from 3 seconds to 1 second
+ *
+ * v1.0.0-b37 (2026-05-29)
+ *   - ADDED: WiFi scan result logs include LR11xx-reported scan power consumption in uAh
+ *
  * v1.0.0-b35 (2026-05-28)
  *   - FIXED: Firmware never writes, clears, or replaces app_param DevEUI
  *   - CHANGED: Config app / AT DevEUI setter is rejected; DevEUI is factory-provisioned read-only identity

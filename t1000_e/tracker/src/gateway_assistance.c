@@ -466,24 +466,6 @@ bool gateway_assistance_send_hot_start(void)
     return gnss_send_command(hot_start_cmd);
 }
 
-bool gateway_assistance_send_test_position(void)
-{
-    // TEMPORARY TEST POSITION - Algarve, Portugal
-    // Latitude: 37.099775°N
-    // Longitude: 8.460805°W (negative for West)
-    // Altitude: 63m
-    // Accuracy: 50m horizontal, 100m vertical
-    
-    char pos_cmd[96];
-    snprintf(pos_cmd, sizeof(pos_cmd), 
-             "$PAIR600,37.099775,-8.460805,63.0,50.0,50.0,0.0,100.0");
-    
-    HAL_DBG_TRACE_INFO("[TEST] Sending hardcoded position to AG3335 NVRAM\n");
-    HAL_DBG_TRACE_INFO("[TEST] Position: 37.099775°N, 8.460805°W, altitude 63m\n");
-    
-    return gnss_send_command(pos_cmd);
-}
-
 bool gateway_assistance_should_check_almanac(void)
 {
     // Only check while charging to preserve battery

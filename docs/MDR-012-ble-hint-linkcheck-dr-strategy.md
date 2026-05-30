@@ -163,6 +163,7 @@ TX power:
 
 ## Related notes
 
+- [[MDR-020: Crew Tag Geolocation Method Order and WiFi Presence Detection]]
 - [[System Goals]]
 - [[Design Principles]]
 - [[Known Limitations and Risk Register]]

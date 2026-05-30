@@ -53,6 +53,7 @@
 #define CREW_HP_CHANNEL_FREQ_HZ     869525000
 #define CREW_HP_CHANNEL_DR          3
 #define CREW_BLE_UPLINK_RECORD_LEN  5
+#define STARTUP_SERIAL_DELAY_MS     5000
 
 /* Fleet de-synchronisation windows. All are deterministic per DevEUI, so a tag keeps
  * the same phase across reboots while the fleet is spread across the available window.
@@ -154,7 +155,7 @@ static uint32_t last_time_sync_s = 0;  // Track last DeviceTimeReq for periodic 
 uint8_t tracker_scan_type = 0;
 
 uint32_t gnss_scan_duration = 30;            // in second
-uint32_t wifi_scan_duration = 3;            // in second
+uint32_t wifi_scan_duration = 1;            // in second
 uint32_t ble_scan_duration = 3;             // in second
 uint32_t tracker_periodic_interval = 60;    // in second
 
@@ -370,6 +371,9 @@ int main( void )
     /* Initialize marine GNSS tracking */
     mob_tracker_init( );
     
+    HAL_DBG_TRACE_INFO( "Waiting 5s for serial connection...\n" );
+    hal_mcu_wait_ms( STARTUP_SERIAL_DELAY_MS );
+
     /* Print firmware version */
     HAL_DBG_TRACE_INFO( "========================================\n" );
     HAL_DBG_TRACE_INFO( "T1000-E Tracker Firmware v%s\n", FIRMWARE_VERSION_STRING );
@@ -384,20 +388,9 @@ int main( void )
         || tracker_scan_type == TRACKER_SCAN_BLE_GNSS 
         || tracker_scan_type == TRACKER_SCAN_BLE_WIFI_GNSS )
     {
-        // Delay to allow serial connection before GNSS init logs
-        HAL_DBG_TRACE_INFO( "Waiting 5s for serial connection...\n" );
-        hal_mcu_wait_ms( 5000 );
-        
         gnss_init( );
         gnss_scan_start( );
         hal_mcu_wait_ms( 3000 );
-        
-        /* TEMPORARY: Send hardcoded test position to AG3335 NVRAM */
-        /* TODO: Remove this when server position downlink is implemented */
-        /* Must be sent BEFORE gnss_scan_stop() while module is powered */
-        gateway_assistance_send_test_position( );
-        hal_mcu_wait_ms( 500 );  // Allow time for ACK responses
-        
         gnss_scan_stop( );
     }
 
@@ -1712,16 +1705,38 @@ static void app_tracker_wifi_scan_begin( void )
     wifi_scan_start( modem_radio );
 }
 
-static void app_tracker_wifi_scan_end( void )
+static bool app_tracker_wifi_scan_end( void )
 {
     wifi_scan_stop( modem_radio );
     wifi_get_results( modem_radio, tracker_wifi_scan_data, &tracker_wifi_scan_len );
     wifi_display_results( );
+    if( wifi_scan_should_scan_remainder_channels( ) )
+    {
+        LOG_WIFI( "wifi primary channels empty - scan remaining channels\n\n" );
+        wifi_scan_prepare_remainder_channels( );
+        app_tracker_wifi_scan_begin( );
+        return false;
+    }
+
+    if( wifi_scan_update_adaptive_state( ) )
+    {
+        LOG_WIFI( "mobile/random AP only - provisional WiFi accept; next scan max_results=%u\n\n",
+                  wifi_scan_get_next_max_results( ) );
+        memset( tracker_wifi_scan_data, 0xFF, 7 );
+        tracker_wifi_scan_len = 7;
+    }
+
     uint8_t len_max = wifi_scan_max * 7;
     if( tracker_wifi_scan_len > len_max ) tracker_wifi_scan_len = len_max;
+    if( tracker_wifi_scan_len && ( tracker_wifi_scan_len < len_max ) )
+    {
+        memset( tracker_wifi_scan_data + tracker_wifi_scan_len, 0xFF, len_max - tracker_wifi_scan_len );
+        tracker_wifi_scan_len = len_max;
+    }
     if( tracker_wifi_scan_len ) scan_result_num ++;
     if( scan_result_num > 3 ) scan_result_num = 3;
     if( tracker_test_mode == 0 && tracker_wifi_scan_len ) scan_result = true;
+    return true;
 }
 
 // REMOVED: app_get_adaptive_gnss_scan_duration()
@@ -2050,11 +2065,18 @@ static void app_tracker_scan_process( void )
         }
         else if( tracker_scan_status == 1 )
         {
-            next_delay = (int32_t)( tracker_periodic_interval ) - wifi_scan_duration;
-            smtc_modem_alarm_start_timer( next_delay > 0 ? next_delay : 1 );
-            LOG_WIFI( "wifi end, new alarm %d s\n\n", next_delay > 0 ? next_delay : 1 );
-            app_tracker_wifi_scan_end( );
-            tracker_scan_status = 0xff;
+            if( app_tracker_wifi_scan_end( ) == false )
+            {
+                smtc_modem_alarm_start_timer( wifi_scan_duration );
+                LOG_WIFI( "wifi remainder begin, new alarm %d s\n\n", wifi_scan_duration );
+            }
+            else
+            {
+                next_delay = (int32_t)( tracker_periodic_interval ) - wifi_scan_duration;
+                smtc_modem_alarm_start_timer( next_delay > 0 ? next_delay : 1 );
+                LOG_WIFI( "wifi end, new alarm %d s\n\n", next_delay > 0 ? next_delay : 1 );
+                tracker_scan_status = 0xff;
+            }
         }
     }
     else if(( scan_result == false ) && ( tracker_scan_type == TRACKER_SCAN_WIFI_GNSS ))
@@ -2069,7 +2091,12 @@ static void app_tracker_scan_process( void )
         }
         else if( tracker_scan_status == 1 )
         {
-            app_tracker_wifi_scan_end( );
+            if( app_tracker_wifi_scan_end( ) == false )
+            {
+                smtc_modem_alarm_start_timer( wifi_scan_duration );
+                LOG_WIFI( "wifi remainder begin, new alarm %d s\n\n", wifi_scan_duration );
+                return;
+            }
             if( scan_result )
             {
                 next_delay = (int32_t)( tracker_periodic_interval ) - wifi_scan_duration;
@@ -2161,11 +2188,18 @@ static void app_tracker_scan_process( void )
         }
         else if( tracker_scan_status == 2 )
         {
-            next_delay = (int32_t)( tracker_periodic_interval ) - ( hal_rtc_get_time_s( ) - tracker_scan_begin );
-            smtc_modem_alarm_start_timer( next_delay > 0 ? next_delay : 1 );
-            LOG_WIFI( "wifi end, new alarm %d s\n\n", next_delay > 0 ? next_delay : 1 );
-            app_tracker_wifi_scan_end( );
-            tracker_scan_status = 0xff;
+            if( app_tracker_wifi_scan_end( ) == false )
+            {
+                smtc_modem_alarm_start_timer( wifi_scan_duration );
+                LOG_WIFI( "wifi remainder begin, new alarm %d s\n\n", wifi_scan_duration );
+            }
+            else
+            {
+                next_delay = (int32_t)( tracker_periodic_interval ) - ( hal_rtc_get_time_s( ) - tracker_scan_begin );
+                smtc_modem_alarm_start_timer( next_delay > 0 ? next_delay : 1 );
+                LOG_WIFI( "wifi end, new alarm %d s\n\n", next_delay > 0 ? next_delay : 1 );
+                tracker_scan_status = 0xff;
+            }
         }
     }
     else if(( scan_result == false ) && ( tracker_scan_type == TRACKER_SCAN_BLE_ONLY ))
@@ -2218,11 +2252,18 @@ static void app_tracker_scan_process( void )
         }
         else if( tracker_scan_status == 2 )
         {
-            next_delay = (int32_t)( tracker_periodic_interval ) - ble_scan_duration - wifi_scan_duration;
-            smtc_modem_alarm_start_timer( next_delay > 0 ? next_delay : 1 );
-            LOG_WIFI( "wifi end, new alarm %d s\n\n", next_delay > 0 ? next_delay : 1 );
-            app_tracker_wifi_scan_end( );
-            tracker_scan_status = 0xff;
+            if( app_tracker_wifi_scan_end( ) == false )
+            {
+                smtc_modem_alarm_start_timer( wifi_scan_duration );
+                LOG_WIFI( "wifi remainder begin, new alarm %d s\n\n", wifi_scan_duration );
+            }
+            else
+            {
+                next_delay = (int32_t)( tracker_periodic_interval ) - ble_scan_duration - wifi_scan_duration;
+                smtc_modem_alarm_start_timer( next_delay > 0 ? next_delay : 1 );
+                LOG_WIFI( "wifi end, new alarm %d s\n\n", next_delay > 0 ? next_delay : 1 );
+                tracker_scan_status = 0xff;
+            }
         }
     }
     else if(( scan_result == false ) && ( tracker_scan_type == TRACKER_SCAN_BLE_GNSS ))
@@ -2323,7 +2364,12 @@ static void app_tracker_scan_process( void )
         }
         else if( tracker_scan_status == 2 )
         {
-            app_tracker_wifi_scan_end( );
+            if( app_tracker_wifi_scan_end( ) == false )
+            {
+                smtc_modem_alarm_start_timer( wifi_scan_duration );
+                LOG_WIFI( "wifi remainder begin, new alarm %d s\n\n", wifi_scan_duration );
+                return;
+            }
             if( scan_result )
             {
                 next_delay = (int32_t)( tracker_periodic_interval ) - ble_scan_duration - wifi_scan_duration;

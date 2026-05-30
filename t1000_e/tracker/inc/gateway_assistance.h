@@ -252,20 +252,6 @@ bool gateway_assistance_send_warm_start(void);
 bool gateway_assistance_send_hot_start(void);
 
 /*!
- * @brief Send hardcoded test position to AG3335 (TEMPORARY for testing)
- *
- * Sends PAIR600 with hardcoded coordinates for initial testing:
- * - Latitude: 37.099775°N
- * - Longitude: 8.460805°W
- * - Altitude: 63m
- *
- * @note This is a temporary function for testing. Remove when server downlink implemented.
- *
- * @returns true if command was sent successfully
- */
-bool gateway_assistance_send_test_position(void);
-
-/*!
  * @brief Periodic almanac maintenance check (call every 24 hours while charging)
  *
  * When device is on charge, this should be called periodically (every 24 hours)

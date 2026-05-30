@@ -77,6 +77,16 @@ void smtc_wifi_scan_ended( void );
  */
 bool smtc_wifi_get_power_consumption( const void* radio_context, uint32_t* power_consumption_uah );
 
+/*!
+ * @brief Get the power consumption and cumulative timing details of the last scan
+ *
+ * @param [in] radio_context Chip implementation context
+ * @param [out] result Scan result structure receiving power and timing fields
+ *
+ * @return a boolean: true for success, false otherwise
+ */
+bool smtc_wifi_get_power_consumption_details( const void* radio_context, wifi_scan_all_result_t* result );
+
 #ifdef __cplusplus
 }
 #endif

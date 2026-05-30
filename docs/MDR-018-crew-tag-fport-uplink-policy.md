@@ -109,6 +109,7 @@ Gateway shim policy:
 ## Related notes
 
 - [[MDR-012: BLE Hint and LinkCheck Based Crew Tag DR Strategy]]
+- [[MDR-020: Crew Tag Geolocation Method Order and WiFi Presence Detection]]
 - [[MDR-019: Crew Tag Charger State Routing and POB Counting]]
 - `UPLINK_PAYLOADS.md`
 - `t1000_e/tracker/inc/crew_lorawan_ports.h`
