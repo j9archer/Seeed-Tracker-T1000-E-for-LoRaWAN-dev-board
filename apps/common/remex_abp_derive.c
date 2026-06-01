@@ -27,7 +27,7 @@
 #ifdef Group_1_block
 #define REMEX_ABP_GROUP1_BLOCK_SIZE Group_1_block
 #else
-#define REMEX_ABP_GROUP1_BLOCK_SIZE 16
+#define REMEX_ABP_GROUP1_BLOCK_SIZE 32
 #endif
 #endif
 

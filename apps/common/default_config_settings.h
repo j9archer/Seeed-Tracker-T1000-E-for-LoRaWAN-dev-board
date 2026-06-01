@@ -31,7 +31,7 @@
 #define REMEX_ABP_MASTER_KEY                   "00007955000980007000400600002000"
 #define REMEX_ABP_NET_ID_START                 "E00110"
 #define REMEX_ABP_NET_ID_END                   "E00110"
-#define REMEX_ABP_GROUP1_BLOCK_SIZE            16
+#define REMEX_ABP_GROUP1_BLOCK_SIZE            32
 
 #define REMEX_DEFAULT_LORAWAN_ADR_ENABLED      false
 #define REMEX_DEFAULT_LORAWAN_DR_MIN           1
