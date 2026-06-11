@@ -20,6 +20,15 @@ function decodeUplink (input) {
             return { data: alertDecoded }
         }
     }
+    if (fport === 5 || fport === 7 || fport === 8 || fport === 11) {
+        const compactDecoded = decodeRemexCompactUplink(bytes, bytesString, fport)
+        if (compactDecoded.valid) {
+            return { data: compactDecoded }
+        }
+        if (fport === 8 || fport === 11) {
+            return { data: compactDecoded }
+        }
+    }
     let measurement = messageAnalyzed(originMessage)
     if (measurement.length === 0) {
         decoded.valid = false
@@ -48,6 +57,230 @@ function decodeUplink (input) {
     }
     // decoded.messages = measurement
     return { data: decoded }
+}
+
+function decodeRemexCompactUplink (bytes, bytesString, fport) {
+    const decoded = {
+        valid: false,
+        err: 1,
+        payload: bytesString,
+        firmwareType: 'remex',
+        fPort: fport,
+        compactPayload: true,
+        messages: []
+    }
+
+    if (!bytes || bytes.length === 0) {
+        decoded.errMessage = 'Empty compact payload'
+        return decoded
+    }
+
+    if (fport === 5 || fport === 7) {
+        return decodeCrewPresenceCompact(bytes, bytesString, fport)
+    }
+    if (fport === 8) {
+        return decodeCrewHealthEvent(bytes, bytesString, fport)
+    }
+    if (fport === 11) {
+        return decodeCrewRfFingerprint(bytes, bytesString, fport)
+    }
+
+    decoded.errMessage = `Unsupported compact payload on fPort ${fport}`
+    return decoded
+}
+
+function decodeCrewPresenceCompact (bytes, bytesString, fport) {
+    const nowMs = Date.now()
+    const timestampSec = Math.floor(nowMs / 1000)
+    const decoded = compactDecodedBase(bytesString, fport)
+
+    if (bytes.length < 5 || schemaVersionOf(u8(bytes, 0)) !== 1) {
+        decoded.errMessage = 'Not a RemEX compact presence payload'
+        return decoded
+    }
+
+    const schemaPhase = u8(bytes, 0)
+    const eventRaw = u8(bytes, 1)
+    const battery = u8(bytes, 2)
+    const locationAgeMin = u8(bytes, 3)
+    const sourceFlags = u8(bytes, 4)
+    const sourceType = sourceFlags & 0x07
+    let offset = 5
+    const localSource = {
+        type: sourceTypeName(sourceType),
+        typeRaw: sourceType,
+        accepted: (sourceFlags & 0x08) !== 0,
+        rssiPresent: (sourceFlags & 0x10) !== 0,
+        identityPresent: (sourceFlags & 0x20) !== 0
+    }
+
+    if (sourceType === 1 && localSource.identityPresent) {
+        if (bytes.length < offset + 4) {
+            decoded.errMessage = 'Short BLE compact presence extension'
+            return decoded
+        }
+        localSource.bleMajor = u16le(bytes, offset)
+        localSource.bleMinor = u16le(bytes, offset + 2)
+        offset += 4
+        if (localSource.rssiPresent) {
+            if (bytes.length < offset + 1) {
+                decoded.errMessage = 'Short BLE compact presence RSSI'
+                return decoded
+            }
+            localSource.rssi = s8(bytes, offset)
+            offset += 1
+        }
+    } else if ((sourceType === 2 || sourceType === 3) && localSource.identityPresent) {
+        if (bytes.length < offset + 8) {
+            decoded.errMessage = 'Short WiFi compact presence extension'
+            return decoded
+        }
+        localSource.bssid = macString(bytes, offset)
+        offset += 6
+        localSource.rssi = s8(bytes, offset)
+        offset += 1
+        localSource.wifiFlags = u8(bytes, offset)
+        offset += 1
+    }
+
+    const eventFlags = eventFlagsFromRaw(eventRaw)
+    if (fport === 7) {
+        eventFlags.raw |= 0x04
+        eventFlags.onCharge = true
+    }
+
+    const presence = {
+        schemaVersion: schemaVersionOf(schemaPhase),
+        phase: phaseOf(schemaPhase),
+        phaseName: presencePhaseName(phaseOf(schemaPhase)),
+        eventFlags,
+        battery,
+        locationAgeMin,
+        sourceFlags,
+        localSource,
+        onCharge: eventFlags.onCharge
+    }
+
+    decoded.valid = true
+    decoded.err = 0
+    decoded.presence = presence
+    decoded.messages.push(compactPresenceMeasurements(presence, timestampSec, nowMs))
+    return decoded
+}
+
+function decodeCrewHealthEvent (bytes, bytesString, fport) {
+    const nowMs = Date.now()
+    const timestampSec = Math.floor(nowMs / 1000)
+    const decoded = compactDecodedBase(bytesString, fport)
+
+    if (bytes.length < 5 || schemaVersionOf(u8(bytes, 0)) !== 1) {
+        decoded.errMessage = 'Invalid RemEX health/event payload'
+        return decoded
+    }
+
+    const schemaFamily = u8(bytes, 0)
+    const eventRaw = u8(bytes, 1)
+    const healthEvent = {
+        schemaVersion: schemaVersionOf(schemaFamily),
+        family: phaseOf(schemaFamily),
+        familyName: healthEventFamilyName(phaseOf(schemaFamily)),
+        eventFlags: eventFlagsFromRaw(eventRaw),
+        battery: u8(bytes, 2),
+        value1: u8(bytes, 3),
+        value2: u8(bytes, 4)
+    }
+
+    if (healthEvent.family === 1) {
+        healthEvent.batteryDropPct = healthEvent.value1
+        healthEvent.hoursSinceLastReport = healthEvent.value2
+    }
+
+    decoded.valid = true
+    decoded.err = 0
+    decoded.healthEvent = healthEvent
+    decoded.messages.push(compactHealthMeasurements(healthEvent, timestampSec, nowMs))
+    return decoded
+}
+
+function decodeCrewRfFingerprint (bytes, bytesString, fport) {
+    const nowMs = Date.now()
+    const timestampSec = Math.floor(nowMs / 1000)
+    const decoded = compactDecodedBase(bytesString, fport)
+
+    if (bytes.length < 5 || schemaVersionOf(u8(bytes, 0)) !== 1) {
+        decoded.errMessage = 'Invalid RemEX RF fingerprint payload'
+        return decoded
+    }
+
+    const schemaPhase = u8(bytes, 0)
+    const eventRaw = u8(bytes, 1)
+    const recordCount = u8(bytes, 4)
+    let offset = 5
+    const records = []
+
+    for (let index = 0; index < recordCount && offset < bytes.length; index++) {
+        const recordType = u8(bytes, offset)
+        if (recordType === 0x01) {
+            if (bytes.length < offset + 6) {
+                decoded.errMessage = 'Short BLE RF fingerprint record'
+                return decoded
+            }
+            records.push({
+                type: 'BLE',
+                major: u16le(bytes, offset + 1),
+                minor: u16le(bytes, offset + 3),
+                rssi: s8(bytes, offset + 5)
+            })
+            offset += 6
+        } else if (recordType === 0x02) {
+            if (bytes.length < offset + 9) {
+                decoded.errMessage = 'Short WiFi RF fingerprint record'
+                return decoded
+            }
+            records.push({
+                type: 'WiFi',
+                bssid: macString(bytes, offset + 1),
+                rssi: s8(bytes, offset + 7),
+                flags: u8(bytes, offset + 8)
+            })
+            offset += 9
+        } else {
+            decoded.errMessage = `Unsupported RF fingerprint record type ${recordType}`
+            return decoded
+        }
+    }
+
+    const fingerprint = {
+        schemaVersion: schemaVersionOf(schemaPhase),
+        phase: phaseOf(schemaPhase),
+        phaseName: presencePhaseName(phaseOf(schemaPhase)),
+        eventFlags: eventFlagsFromRaw(eventRaw),
+        battery: u8(bytes, 2),
+        locationAgeMin: u8(bytes, 3),
+        recordCount,
+        records
+    }
+
+    decoded.valid = records.length === recordCount
+    decoded.err = decoded.valid ? 0 : 1
+    decoded.errMessage = decoded.valid ? undefined : 'RF fingerprint record count mismatch'
+    decoded.rfFingerprint = fingerprint
+    if (decoded.valid) {
+        decoded.messages.push(compactRfFingerprintMeasurements(fingerprint, timestampSec, nowMs))
+    }
+    return decoded
+}
+
+function compactDecodedBase (bytesString, fport) {
+    return {
+        valid: false,
+        err: 1,
+        payload: bytesString,
+        firmwareType: 'remex',
+        fPort: fport,
+        compactPayload: true,
+        messages: []
+    }
 }
 
 function annotateChargerPortMeasurements (messages) {
@@ -88,11 +321,15 @@ function decodeCrewAlertUplink (bytes, bytesString, fport) {
         messages: []
     }
 
-    if (dataId === 0x20 && bytes.length === 13) {
+    if (dataId === 0x20 && (bytes.length === 13 || bytes.length === 16)) {
         const modeRaw = u8(bytes, 1)
         const qualityFlags = u8(bytes, 11)
         const latitude = i32le(bytes, 2) / 1000000
         const longitude = i32le(bytes, 6) / 1000000
+        const vectorPresent = bytes.length === 16
+        const cogRaw = vectorPresent ? u16le(bytes, 13) : 0xFFFF
+        const sogRaw = vectorPresent ? u8(bytes, 15) : 0xFF
+        const vectorValid = vectorPresent && (qualityFlags & 0x08) !== 0 && cogRaw !== 0xFFFF && sogRaw !== 0xFF
         decoded.mob = {
             msgType: 0x04,
             msgTypeName: 'MOB position',
@@ -104,6 +341,9 @@ function decodeCrewAlertUplink (bytes, bytesString, fport) {
             qualityFlags,
             fixValid: (qualityFlags & 0x01) !== 0,
             qualityOk: (qualityFlags & 0x02) !== 0,
+            vectorValid,
+            cog: vectorValid ? cogRaw / 2 : null,
+            sog: vectorValid ? Math.min(sogRaw, 0xFE) / 10 : null,
             onCharge: ((modeRaw & 0x80) !== 0) || ((qualityFlags & 0x04) !== 0),
             battery: s8(bytes, 12)
         }
@@ -142,6 +382,81 @@ function decodeCrewAlertUplink (bytes, bytesString, fport) {
         return decoded
     }
 
+    if (dataId === 0x23 && bytes.length >= 7) {
+        const schemaPhase = u8(bytes, 1)
+        const eventRaw = u8(bytes, 2)
+        const sourceFlags = u8(bytes, 4)
+        const evidenceFlags = u8(bytes, 5)
+        const sourceType = sourceFlags & 0x07
+        const localSourceAccepted = ((sourceFlags | evidenceFlags) & 0x08) !== 0
+        const gnssAttempted = (evidenceFlags & 0x04) !== 0
+        const gnssFixValid = (evidenceFlags & 0x10) !== 0
+        const noFixYet = ((evidenceFlags & 0x40) !== 0) || (gnssAttempted && !gnssFixValid)
+        const eventFlags = eventFlagsFromRaw(eventRaw | 0x40)
+        let offset = 7
+        const localSource = {
+            type: sourceTypeName(sourceType),
+            typeRaw: sourceType,
+            accepted: localSourceAccepted,
+            rssiPresent: (sourceFlags & 0x10) !== 0,
+            identityPresent: (sourceFlags & 0x20) !== 0
+        }
+
+        if (sourceType === 1 && localSource.identityPresent && bytes.length >= offset + 4) {
+            localSource.bleMajor = u16le(bytes, offset)
+            localSource.bleMinor = u16le(bytes, offset + 2)
+            offset += 4
+        } else if ((sourceType === 2 || sourceType === 3) && localSource.identityPresent && bytes.length >= offset + 6) {
+            localSource.bssid = bytes.slice(offset, offset + 6)
+                .map((b) => u8([b], 0).toString(16).padStart(2, '0').toUpperCase())
+                .join(':')
+            offset += 6
+            if (bytes.length > offset) {
+                localSource.wifiFlags = u8(bytes, offset)
+                offset += 1
+            }
+        }
+        if (localSource.rssiPresent && bytes.length > offset) {
+            localSource.rssi = s8(bytes, offset)
+            offset += 1
+        }
+
+        const sosContext = {
+            msgType: 0x23,
+            msgTypeName: noFixYet ? 'SOS no fix yet' : 'SOS context',
+            schemaVersion: (schemaPhase >> 4) & 0x0F,
+            phase: schemaPhase & 0x0F,
+            eventFlags,
+            battery: s8(bytes, 3),
+            sourceFlags,
+            localSource,
+            evidenceFlags,
+            bleAttempted: (evidenceFlags & 0x01) !== 0,
+            wifiAttempted: (evidenceFlags & 0x02) !== 0,
+            gnssAttempted,
+            localSourceAccepted,
+            gnssFixValid,
+            gnssQualityOk: (evidenceFlags & 0x20) !== 0,
+            noFixYet,
+            uncertain: noFixYet && !localSourceAccepted,
+            mobConfirmed: false,
+            gpsValid: gnssFixValid,
+            onCharge: eventFlags.onCharge,
+            reason: sosContextReason(u8(bytes, 6))
+        }
+
+        if (gnssFixValid && bytes.length >= offset + 10) {
+            sosContext.latitude = i32le(bytes, offset) / 1000000
+            sosContext.longitude = i32le(bytes, offset + 4) / 1000000
+            sosContext.hdop = u8(bytes, offset + 8) / 10
+            sosContext.sats = u8(bytes, offset + 9)
+        }
+
+        decoded.sosContext = sosContext
+        decoded.messages.push(crewAlertMeasurements(sosContext, timestampSec, nowMs))
+        return decoded
+    }
+
     decoded.valid = false
     decoded.err = 1
     decoded.errMessage = `Unsupported crew alert payload on fPort ${fport}`
@@ -168,6 +483,18 @@ function crewAlertMeasurements (mob, collectTime, timestamp) {
         }
     ]
 
+    if (mob.eventFlags) {
+        measurements.unshift({
+            measurementId: '4200',
+            type: 'Event Status',
+            measureTime: collectTime,
+            timestamp: timestamp,
+            value: mob.eventFlags,
+            measurementValue: mob.eventFlags,
+            motionId: mob.eventFlags.raw
+        })
+    }
+
     if (mob.latitude !== undefined && mob.longitude !== undefined) {
         measurements.push({
             measurementId: '4198',
@@ -188,6 +515,237 @@ function crewAlertMeasurements (mob, collectTime, timestamp) {
     }
 
     return measurements
+}
+
+function eventFlagsFromRaw (value) {
+    return {
+        raw: value,
+        onCharge: (value & 0x04) !== 0,
+        shockDetected: (value & 0x08) !== 0,
+        swimMode: (value & 0x10) !== 0,
+        gnssReady: (value & 0x20) !== 0,
+        sosActive: (value & 0x40) !== 0,
+        userTriggered: (value & 0x80) !== 0
+    }
+}
+
+function sourceTypeName (value) {
+    switch (value) {
+        case 1: return 'BLE'
+        case 2: return 'WiFi fixed'
+        case 3: return 'WiFi provisional'
+        case 4: return 'GNSS'
+        default: return 'none'
+    }
+}
+
+function sosContextReason (value) {
+    switch (value) {
+        case 1: return 'no approved BLE'
+        case 2: return 'WiFi provisional rejected'
+        case 3: return 'GNSS unavailable'
+        case 4: return 'GNSS timeout'
+        case 5: return 'GNSS no fix yet'
+        default: return value === 0 ? 'none' : `reserved ${value}`
+    }
+}
+
+function compactPresenceMeasurements (presence, collectTime, timestamp) {
+    const measurements = compactCommonMeasurements(presence, collectTime, timestamp)
+    measurements.push({
+        measurementId: '6002',
+        type: 'Crew Presence',
+        measureTime: collectTime,
+        timestamp: timestamp,
+        value: presence,
+        measurementValue: presence
+    })
+
+    if (presence.localSource && presence.localSource.typeRaw === 1 && presence.localSource.bleMajor !== undefined) {
+        const bleScan = [{
+            major: presence.localSource.bleMajor,
+            minor: presence.localSource.bleMinor,
+            rssi: presence.localSource.rssi
+        }]
+        measurements.push({
+            measurementId: '5002',
+            type: 'BLE Scan',
+            measureTime: collectTime,
+            timestamp: timestamp,
+            value: bleScan,
+            measurementValue: bleScan,
+            motionId: presence.eventFlags.raw
+        })
+    }
+
+    if (presence.localSource && (presence.localSource.typeRaw === 2 || presence.localSource.typeRaw === 3) &&
+        presence.localSource.bssid !== undefined) {
+        const wifiScan = [{
+            mac: presence.localSource.bssid,
+            rssi: presence.localSource.rssi,
+            flags: presence.localSource.wifiFlags,
+            provisional: presence.localSource.typeRaw === 3
+        }]
+        measurements.push({
+            measurementId: '5001',
+            type: 'Wi-Fi Scan',
+            measureTime: collectTime,
+            timestamp: timestamp,
+            value: wifiScan,
+            measurementValue: wifiScan,
+            motionId: presence.eventFlags.raw
+        })
+    }
+
+    return measurements
+}
+
+function compactHealthMeasurements (healthEvent, collectTime, timestamp) {
+    const measurements = [
+        {
+            measurementId: '4200',
+            type: 'Event Status',
+            measureTime: collectTime,
+            timestamp: timestamp,
+            value: healthEvent.eventFlags,
+            measurementValue: healthEvent.eventFlags,
+            motionId: healthEvent.eventFlags.raw
+        },
+        {
+            measurementId: '3000',
+            type: 'Battery',
+            measureTime: collectTime,
+            timestamp: timestamp,
+            value: healthEvent.battery,
+            measurementValue: healthEvent.battery,
+            motionId: healthEvent.eventFlags.raw
+        },
+        {
+            measurementId: '6003',
+            type: 'Crew Health Event',
+            measureTime: collectTime,
+            timestamp: timestamp,
+            value: healthEvent,
+            measurementValue: healthEvent,
+            motionId: healthEvent.eventFlags.raw
+        }
+    ]
+    return measurements
+}
+
+function compactRfFingerprintMeasurements (fingerprint, collectTime, timestamp) {
+    const measurements = compactCommonMeasurements(fingerprint, collectTime, timestamp)
+    measurements.push({
+        measurementId: '6004',
+        type: 'RF Fingerprint',
+        measureTime: collectTime,
+        timestamp: timestamp,
+        value: fingerprint,
+        measurementValue: fingerprint,
+        motionId: fingerprint.eventFlags.raw
+    })
+
+    const bleRecords = fingerprint.records.filter((record) => record.type === 'BLE')
+    if (bleRecords.length > 0) {
+        measurements.push({
+            measurementId: '5002',
+            type: 'BLE Scan',
+            measureTime: collectTime,
+            timestamp: timestamp,
+            value: bleRecords,
+            measurementValue: bleRecords,
+            motionId: fingerprint.eventFlags.raw
+        })
+    }
+
+    const wifiRecords = fingerprint.records.filter((record) => record.type === 'WiFi')
+    if (wifiRecords.length > 0) {
+        measurements.push({
+            measurementId: '5001',
+            type: 'Wi-Fi Scan',
+            measureTime: collectTime,
+            timestamp: timestamp,
+            value: wifiRecords,
+            measurementValue: wifiRecords,
+            motionId: fingerprint.eventFlags.raw
+        })
+    }
+
+    return measurements
+}
+
+function compactCommonMeasurements (payload, collectTime, timestamp) {
+    const measurements = [
+        {
+            measurementId: '4200',
+            type: 'Event Status',
+            measureTime: collectTime,
+            timestamp: timestamp,
+            value: payload.eventFlags,
+            measurementValue: payload.eventFlags,
+            motionId: payload.eventFlags.raw
+        },
+        {
+            measurementId: '3000',
+            type: 'Battery',
+            measureTime: collectTime,
+            timestamp: timestamp,
+            value: payload.battery,
+            measurementValue: payload.battery,
+            motionId: payload.eventFlags.raw
+        }
+    ]
+
+    if (payload.locationAgeMin !== undefined) {
+        measurements.push({
+            measurementId: '6001',
+            type: 'Location Age',
+            measureTime: collectTime,
+            timestamp: timestamp,
+            value: payload.locationAgeMin,
+            measurementValue: payload.locationAgeMin,
+            motionId: payload.eventFlags.raw
+        })
+    }
+
+    return measurements
+}
+
+function schemaVersionOf (schemaPhase) {
+    return (schemaPhase >> 4) & 0x0F
+}
+
+function phaseOf (schemaPhase) {
+    return schemaPhase & 0x0F
+}
+
+function presencePhaseName (phase) {
+    switch (phase) {
+        case 0: return 'routine'
+        case 1: return 'onboard'
+        case 2: return 'uncertain'
+        case 3: return 'MOB'
+        case 4: return 'PIW'
+        case 5: return 'SOS'
+        default: return `reserved ${phase}`
+    }
+}
+
+function healthEventFamilyName (family) {
+    switch (family) {
+        case 1: return 'battery health'
+        case 2: return 'low battery'
+        case 3: return 'shock'
+        case 4: return 'light'
+        case 5: return 'temperature'
+        default: return `reserved ${family}`
+    }
+}
+
+function macString (bytes, offset) {
+    return bytes.slice(offset, offset + 6)
+        .map((b) => (b & 0xFF).toString(16).padStart(2, '0').toUpperCase())
+        .join(':')
 }
 
 function messageAnalyzed (messageValue) {
@@ -767,6 +1325,10 @@ function s8 (bytes, offset) {
 
 function u16be (bytes, offset) {
     return (u8(bytes, offset) << 8) | u8(bytes, offset + 1)
+}
+
+function u16le (bytes, offset) {
+    return u8(bytes, offset) | (u8(bytes, offset + 1) << 8)
 }
 
 function i32le (bytes, offset) {

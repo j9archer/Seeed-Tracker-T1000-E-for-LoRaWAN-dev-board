@@ -592,7 +592,7 @@ Decoder work should be staged after the compact payload contract is accepted:
 - [[MDR-019: Crew Tag Charger State Routing and POB Counting]]
 - [[MDR-020: Crew Tag Geolocation Method Order and WiFi Presence Detection]]
 - `UPLINK_PAYLOADS.md`
-- `T1000E_Decoder.js`
+- `RemEX_T1000E_Decoder.js`
 - `apps/examples/11_lorawan_tracker/main_lorawan_tracker.c`
 - `t1000_e/tracker/src/app_ble_all.c`
 - `t1000_e/peripherals/src/wifi_helpers.c`

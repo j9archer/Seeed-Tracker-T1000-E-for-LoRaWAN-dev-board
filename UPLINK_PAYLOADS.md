@@ -146,8 +146,12 @@ These payloads are intentionally compact and use the FPort for routing priority.
 | 2 | 4 | Latitude | int32 little-endian, degrees * 1e6 |
 | 6 | 4 | Longitude | int32 little-endian, degrees * 1e6 |
 | 10 | 1 | HDOP x10 | HDOP multiplied by 10 |
-| 11 | 1 | Quality Flags | Bit 0 fix valid, bit 1 quality OK, bit 2 on charge |
+| 11 | 1 | Quality Flags | Bit 0 fix valid, bit 1 quality OK, bit 2 on charge, bit 3 COG/SOG valid |
 | 12 | 1 | Battery | int8 battery percentage |
+| 13 | 2 | COG x2 | Optional extension, uint16 little-endian degrees x2; `0xFFFF` unknown |
+| 15 | 1 | SOG 0.1 m/s | Optional extension; `0xFF` unknown, `0xFE` saturated |
+
+Legacy 13-byte position frames omit COG/SOG. New 16-byte frames carry firmware-derived COG/SOG from a robust weighted fit over the recent PIW fix history. Valid GNSS fixes are retained even when HDOP/HACC is poor; poor fixes receive lower weight, and implausible points are rejected against the fitted track residual rather than against the immediately previous fix.
 
 #### 0x21: MOB_CANCELLED
 
@@ -446,7 +450,7 @@ Based on typical payload sizes:
 
 ## Decoder Implementation
 
-A JavaScript decoder (`T1000E_Decoder.js`) is available in the repository root. Key decoder functions:
+A JavaScript decoder (`RemEX_T1000E_Decoder.js`) is available in the repository root. Key decoder functions:
 
 - `deserialize()`: Main decoding function (switch on Data ID)
 - `getMacAndRssiObj()`: Parse WiFi/BLE MAC+RSSI pairs
@@ -517,4 +521,4 @@ To minimize airtime in future versions, consider:
 - `VESSEL_ASSISTANCE.md` - Downlink formats for GNSS assistance
 - `CHARGING_ALMANAC_MAINTENANCE.md` - Almanac update behavior
 - `USB_SERIAL_DEBUG.md` - Logging and diagnostics
-- `T1000E_Decoder.js` - JavaScript payload decoder
+- `RemEX_T1000E_Decoder.js` - JavaScript payload decoder

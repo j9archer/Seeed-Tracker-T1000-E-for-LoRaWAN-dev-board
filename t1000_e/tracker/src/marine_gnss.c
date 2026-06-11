@@ -18,6 +18,7 @@
 #include "gateway_assistance.h"
 #include "app_ble_all.h"
 #include "main_lorawan_tracker_api.h"
+#include "default_config_settings.h"
 #include "log_filter.h"
 #include <string.h>
 #include <math.h>
@@ -46,6 +47,7 @@ extern uint32_t ble_scan_duration;
 #define DATA_ID_MOB_NO_FIX          0x22    // MOB no fix available
 #define MOB_PAYLOAD_FLAG_ON_CHARGE  0x80    // ORed into mode byte for FPort 6 MOB records
 #define MOB_QUALITY_FLAG_ON_CHARGE  0x04    // Position quality flag metadata
+#define MOB_QUALITY_FLAG_VECTOR     0x08    // COG/SOG extension is firmware-derived and valid
 #define MOB_CANCEL_FLAG_ON_CHARGE   0x01    // Optional cancellation flags byte metadata
 
 /*
@@ -53,10 +55,66 @@ extern uint32_t ble_scan_duration;
  * --- PRIVATE CONSTANTS -------------------------------------------------------
  */
 
+#define MOB_DRIFT_EARTH_RADIUS_M        6371000.0f
+#define MOB_DRIFT_DEG_TO_RAD            0.01745329251994329577f
+#define MOB_DRIFT_RAD_TO_DEG            57.295779513082320876f
+#define MOB_DRIFT_UNKNOWN_COG_X2        0xFFFFU
+#define MOB_DRIFT_UNKNOWN_SOG_DMPS      0xFFU
+#define MOB_DRIFT_SATURATED_SOG_DMPS    0xFEU
+
+#if REMEX_PIW_DRIFT_FIX_WINDOW < REMEX_PIW_DRIFT_MIN_FIXES
+#error "REMEX_PIW_DRIFT_FIX_WINDOW must be >= REMEX_PIW_DRIFT_MIN_FIXES"
+#endif
+
 /*
  * -----------------------------------------------------------------------------
  * --- PRIVATE TYPES -----------------------------------------------------------
  */
+
+typedef struct
+{
+    bool     valid;
+    int32_t  latitude;
+    int32_t  longitude;
+    float    hdop;
+    float    hacc;
+    uint32_t timestamp_s;
+    float    sigma_m;
+} mob_drift_fix_t;
+
+typedef struct
+{
+    bool     valid;
+    uint16_t cog_x2;
+    uint8_t  sog_dmps;
+    float    east_mps;
+    float    north_mps;
+    float    sog_mps;
+    uint8_t  fix_count;
+    uint8_t  used_count;
+    uint8_t  rejected_count;
+    uint32_t baseline_s;
+    float    rms_residual_m;
+} mob_drift_vector_t;
+
+typedef struct
+{
+    bool     valid;
+    float    east0_m;
+    float    north0_m;
+    float    east_mps;
+    float    north_mps;
+    float    ref_lat_rad;
+    float    ref_lon_rad;
+    uint32_t t0_s;
+    uint32_t t_first_s;
+    uint32_t t_last_s;
+    uint32_t baseline_s;
+    uint8_t  fix_count;
+    uint8_t  used_count;
+    uint8_t  rejected_count;
+    float    rms_residual_m;
+} mob_drift_fit_t;
 
 /*
  * -----------------------------------------------------------------------------
@@ -77,6 +135,10 @@ static bool gnss_continuous_active = false;
 
 // Stack ID for LoRaWAN operations
 static const uint8_t stack_id = 0;
+static mob_drift_fix_t drift_fixes[REMEX_PIW_DRIFT_FIX_WINDOW];
+static uint8_t drift_fix_next = 0;
+static uint8_t drift_fix_count = 0;
+static mob_drift_vector_t drift_vector;
 
 /*
  * -----------------------------------------------------------------------------
@@ -95,6 +157,10 @@ static void mob_send_no_fix_with_policy( app_mob_dr_policy_t policy );
 static uint32_t mob_process_burst( void );
 static uint32_t mob_process_piw( void );
 static void mob_run_ble_scan( void );
+static void mob_drift_reset( void );
+static void mob_drift_update( const gnss_fix_t *fix );
+static bool mob_drift_get_vector( uint16_t *cog_x2, uint8_t *sog_dmps );
+static bool mob_drift_fit_history( const mob_drift_fit_t *reject_fit, mob_drift_fit_t *fit );
 
 static bool initial_burst_sent = false;
 
@@ -108,6 +174,7 @@ void mob_tracker_init( void )
     memset( &tracker_state, 0, sizeof( mob_tracker_state_t ));
     tracker_state.mode = MOB_MODE_IDLE;
     gnss_continuous_active = false;
+    mob_drift_reset( );
     
     MOB_TRACE_INFO( "MOB/PIW tracker initialized\n" );
 }
@@ -128,6 +195,7 @@ bool mob_tracker_activate( void )
     initial_burst_sent = false;
     tracker_state.elapsed_s = 0;
     gnss_continuous_active = false;
+    mob_drift_reset( );
     
     MOB_TRACE_INFO( "========================================\n" );
     MOB_TRACE_INFO( "MOB ACTIVATED - Entering BURST mode\n" );
@@ -333,6 +401,324 @@ static uint32_t mob_get_interval_for_mode( mob_tracker_mode_t mode )
     }
 }
 
+static void mob_drift_reset( void )
+{
+    memset( drift_fixes, 0, sizeof( drift_fixes ));
+    drift_fix_next = 0;
+    drift_fix_count = 0;
+    memset( &drift_vector, 0, sizeof( drift_vector ));
+    drift_vector.cog_x2 = MOB_DRIFT_UNKNOWN_COG_X2;
+    drift_vector.sog_dmps = MOB_DRIFT_UNKNOWN_SOG_DMPS;
+}
+
+static float mob_drift_clamp_sigma_m( float sigma_m )
+{
+    if( sigma_m < REMEX_PIW_DRIFT_SIGMA_FLOOR_M )
+    {
+        return REMEX_PIW_DRIFT_SIGMA_FLOOR_M;
+    }
+
+    if( sigma_m > REMEX_PIW_DRIFT_SIGMA_CEILING_M )
+    {
+        return REMEX_PIW_DRIFT_SIGMA_CEILING_M;
+    }
+
+    return sigma_m;
+}
+
+static float mob_drift_estimate_sigma_m( const gnss_fix_t *fix )
+{
+    /*
+     * sigma_m is the estimated 1-sigma horizontal position error used for
+     * weighting. Poor fixes are not discarded here; they are kept with lower
+     * weight so an older marginal fix can still improve velocity over a long
+     * baseline.
+     */
+    if( fix->hacc > 0.0f && fix->hacc < 1000.0f )
+    {
+        return mob_drift_clamp_sigma_m( fix->hacc );
+    }
+
+    if( fix->hdop > 0.0f && fix->hdop < 99.0f )
+    {
+        return mob_drift_clamp_sigma_m( fix->hdop * REMEX_PIW_DRIFT_UERE_M );
+    }
+
+    return REMEX_PIW_DRIFT_SIGMA_CEILING_M;
+}
+
+static uint8_t mob_drift_collect_fixes( mob_drift_fix_t *ordered )
+{
+    uint8_t count = 0;
+    if( ordered == NULL )
+    {
+        return 0;
+    }
+
+    for( uint8_t i = 0; i < drift_fix_count; i++ )
+    {
+        uint8_t index = ( drift_fix_next + REMEX_PIW_DRIFT_FIX_WINDOW - drift_fix_count + i ) %
+                        REMEX_PIW_DRIFT_FIX_WINDOW;
+        if( drift_fixes[index].valid )
+        {
+            ordered[count++] = drift_fixes[index];
+        }
+    }
+
+    return count;
+}
+
+static void mob_drift_local_xy_m( const mob_drift_fix_t *fix, float ref_lat_rad, float ref_lon_rad,
+                                  float *east_m, float *north_m )
+{
+    float lat_rad = ((float) fix->latitude / 1000000.0f) * MOB_DRIFT_DEG_TO_RAD;
+    float lon_rad = ((float) fix->longitude / 1000000.0f) * MOB_DRIFT_DEG_TO_RAD;
+    float mean_lat = ( lat_rad + ref_lat_rad ) * 0.5f;
+
+    *east_m = ( lon_rad - ref_lon_rad ) * cosf( mean_lat ) * MOB_DRIFT_EARTH_RADIUS_M;
+    *north_m = ( lat_rad - ref_lat_rad ) * MOB_DRIFT_EARTH_RADIUS_M;
+}
+
+static float mob_drift_fit_residual_m( const mob_drift_fit_t *fit, const mob_drift_fix_t *fix )
+{
+    float east_m = 0.0f;
+    float north_m = 0.0f;
+    float dt_s = (float)( fix->timestamp_s - fit->t0_s );
+    mob_drift_local_xy_m( fix, fit->ref_lat_rad, fit->ref_lon_rad, &east_m, &north_m );
+
+    float east_residual = east_m - ( fit->east0_m + ( fit->east_mps * dt_s ));
+    float north_residual = north_m - ( fit->north0_m + ( fit->north_mps * dt_s ));
+    return sqrtf(( east_residual * east_residual ) + ( north_residual * north_residual ));
+}
+
+static bool mob_drift_fit_history( const mob_drift_fit_t *reject_fit, mob_drift_fit_t *fit )
+{
+    /*
+     * Weighted straight-line fit in local east/north meters:
+     *   east(t)  = east0  + east_mps  * t
+     *   north(t) = north0 + north_mps * t
+     *
+     * First pass: reject_fit == NULL, use every valid fix with 1/sigma^2 weight.
+     * Second pass: reject fixes whose residual from the first-pass track exceeds
+     * the configurable sigma gate, then fit again. This makes outlier rejection
+     * track-relative instead of previous-fix-relative.
+     */
+    mob_drift_fix_t fixes[REMEX_PIW_DRIFT_FIX_WINDOW];
+    uint8_t total_count = mob_drift_collect_fixes( fixes );
+
+    if( fit == NULL || total_count < REMEX_PIW_DRIFT_MIN_FIXES )
+    {
+        return false;
+    }
+
+    memset( fit, 0, sizeof( *fit ));
+    fit->fix_count = total_count;
+    fit->t0_s = fixes[0].timestamp_s;
+    fit->ref_lat_rad = ((float) fixes[0].latitude / 1000000.0f) * MOB_DRIFT_DEG_TO_RAD;
+    fit->ref_lon_rad = ((float) fixes[0].longitude / 1000000.0f) * MOB_DRIFT_DEG_TO_RAD;
+
+    float sw = 0.0f;
+    float swt = 0.0f;
+    float swtt = 0.0f;
+    float swe = 0.0f;
+    float swn = 0.0f;
+    float swte = 0.0f;
+    float swtn = 0.0f;
+
+    for( uint8_t i = 0; i < total_count; i++ )
+    {
+        float residual_m = 0.0f;
+        bool use_fix = true;
+
+        if( reject_fit != NULL && reject_fit->valid )
+        {
+            residual_m = mob_drift_fit_residual_m( reject_fit, &fixes[i] );
+            float allowed_m = ( fixes[i].sigma_m * REMEX_PIW_DRIFT_OUTLIER_SIGMA ) +
+                              REMEX_PIW_DRIFT_OUTLIER_MARGIN_M;
+            use_fix = residual_m <= allowed_m;
+        }
+
+        if( !use_fix )
+        {
+            fit->rejected_count++;
+            continue;
+        }
+
+        float east_m = 0.0f;
+        float north_m = 0.0f;
+        float t_s = (float)( fixes[i].timestamp_s - fit->t0_s );
+        float sigma_m = fixes[i].sigma_m;
+        float w = 1.0f / ( sigma_m * sigma_m );
+
+        mob_drift_local_xy_m( &fixes[i], fit->ref_lat_rad, fit->ref_lon_rad, &east_m, &north_m );
+
+        if( fit->used_count == 0 )
+        {
+            fit->t_first_s = fixes[i].timestamp_s;
+        }
+        fit->t_last_s = fixes[i].timestamp_s;
+        fit->used_count++;
+
+        sw += w;
+        swt += w * t_s;
+        swtt += w * t_s * t_s;
+        swe += w * east_m;
+        swn += w * north_m;
+        swte += w * t_s * east_m;
+        swtn += w * t_s * north_m;
+    }
+
+    if( fit->used_count < REMEX_PIW_DRIFT_MIN_FIXES )
+    {
+        return false;
+    }
+
+    float denom = ( sw * swtt ) - ( swt * swt );
+    if( denom <= 0.0001f )
+    {
+        return false;
+    }
+
+    fit->east_mps = (( sw * swte ) - ( swt * swe )) / denom;
+    fit->north_mps = (( sw * swtn ) - ( swt * swn )) / denom;
+    fit->east0_m = ( swe - ( fit->east_mps * swt )) / sw;
+    fit->north0_m = ( swn - ( fit->north_mps * swt )) / sw;
+    fit->baseline_s = fit->t_last_s - fit->t_first_s;
+
+    float residual_sq_sum = 0.0f;
+    uint8_t residual_count = 0;
+    for( uint8_t i = 0; i < total_count; i++ )
+    {
+        if( reject_fit != NULL && reject_fit->valid )
+        {
+            float residual_m = mob_drift_fit_residual_m( reject_fit, &fixes[i] );
+            float allowed_m = ( fixes[i].sigma_m * REMEX_PIW_DRIFT_OUTLIER_SIGMA ) +
+                              REMEX_PIW_DRIFT_OUTLIER_MARGIN_M;
+            if( residual_m > allowed_m )
+            {
+                continue;
+            }
+        }
+
+        float residual_m = mob_drift_fit_residual_m( fit, &fixes[i] );
+        residual_sq_sum += residual_m * residual_m;
+        residual_count++;
+    }
+
+    fit->rms_residual_m = residual_count > 0 ? sqrtf( residual_sq_sum / (float) residual_count ) : 0.0f;
+    fit->valid = true;
+    return true;
+}
+
+static void mob_drift_update( const gnss_fix_t *fix )
+{
+    if( tracker_state.mode == MOB_MODE_BURST || fix == NULL || !fix->valid )
+    {
+        return;
+    }
+
+    uint32_t now_s = hal_rtc_get_time_s( );
+    /* PIW sends a double uplink from the same GNSS result; keep only one sample. */
+    if( drift_fix_count > 0 )
+    {
+        uint8_t last_index = ( drift_fix_next + REMEX_PIW_DRIFT_FIX_WINDOW - 1 ) % REMEX_PIW_DRIFT_FIX_WINDOW;
+        if( drift_fixes[last_index].valid &&
+            drift_fixes[last_index].latitude == fix->latitude &&
+            drift_fixes[last_index].longitude == fix->longitude &&
+            ( now_s - drift_fixes[last_index].timestamp_s ) < REMEX_PIW_DRIFT_DUPLICATE_FIX_S )
+        {
+            return;
+        }
+    }
+
+    drift_fixes[drift_fix_next].valid = true;
+    drift_fixes[drift_fix_next].latitude = fix->latitude;
+    drift_fixes[drift_fix_next].longitude = fix->longitude;
+    drift_fixes[drift_fix_next].hdop = fix->hdop;
+    drift_fixes[drift_fix_next].hacc = fix->hacc;
+    drift_fixes[drift_fix_next].timestamp_s = now_s;
+    drift_fixes[drift_fix_next].sigma_m = mob_drift_estimate_sigma_m( fix );
+    drift_fix_next = ( drift_fix_next + 1 ) % REMEX_PIW_DRIFT_FIX_WINDOW;
+    if( drift_fix_count < REMEX_PIW_DRIFT_FIX_WINDOW )
+    {
+        drift_fix_count++;
+    }
+
+    mob_drift_fit_t provisional_fit;
+    mob_drift_fit_t robust_fit;
+    /* Fit once to define the recent track, then fit again after residual gating. */
+    if( !mob_drift_fit_history( NULL, &provisional_fit ) ||
+        !mob_drift_fit_history( &provisional_fit, &robust_fit ))
+    {
+        return;
+    }
+
+    float sog_mps = sqrtf(( robust_fit.east_mps * robust_fit.east_mps ) +
+                          ( robust_fit.north_mps * robust_fit.north_mps ));
+    float track_span_m = sog_mps * (float) robust_fit.baseline_s;
+    /*
+     * A vector is only emitted once the fitted history covers enough time and
+     * movement to make COG meaningful. This is a track-level gate, not a
+     * point-to-point distance gate, so older poorer fixes can still help.
+     */
+    if( robust_fit.baseline_s < REMEX_PIW_DRIFT_MIN_BASELINE_S ||
+        track_span_m < REMEX_PIW_DRIFT_MIN_TRACK_SPAN_M ||
+        sog_mps > REMEX_PIW_DRIFT_MAX_TRACK_SPEED_MPS )
+    {
+        drift_vector.valid = false;
+        drift_vector.cog_x2 = MOB_DRIFT_UNKNOWN_COG_X2;
+        drift_vector.sog_dmps = MOB_DRIFT_UNKNOWN_SOG_DMPS;
+        return;
+    }
+
+    float cog_deg = atan2f( robust_fit.east_mps, robust_fit.north_mps ) * MOB_DRIFT_RAD_TO_DEG;
+    if( cog_deg < 0.0f )
+    {
+        cog_deg += 360.0f;
+    }
+
+    uint16_t cog_x2 = (uint16_t)( cog_deg * 2.0f + 0.5f );
+    if( cog_x2 >= 720U )
+    {
+        cog_x2 = 0;
+    }
+
+    uint16_t sog_dmps = (uint16_t)( sog_mps * 10.0f + 0.5f );
+    if( sog_dmps >= MOB_DRIFT_SATURATED_SOG_DMPS )
+    {
+        sog_dmps = MOB_DRIFT_SATURATED_SOG_DMPS;
+    }
+
+    drift_vector.valid = true;
+    drift_vector.cog_x2 = cog_x2;
+    drift_vector.sog_dmps = (uint8_t) sog_dmps;
+    drift_vector.east_mps = robust_fit.east_mps;
+    drift_vector.north_mps = robust_fit.north_mps;
+    drift_vector.sog_mps = sog_mps;
+    drift_vector.fix_count = robust_fit.fix_count;
+    drift_vector.used_count = robust_fit.used_count;
+    drift_vector.rejected_count = robust_fit.rejected_count;
+    drift_vector.baseline_s = robust_fit.baseline_s;
+    drift_vector.rms_residual_m = robust_fit.rms_residual_m;
+
+    MOB_TRACE_INFO( "PIW drift fit: fixes=%u used=%u rejected=%u baseline=%lu s span=%.1f m RMS=%.1f m COG=%.1f SOG=%.1f\n",
+                    robust_fit.fix_count, robust_fit.used_count, robust_fit.rejected_count,
+                    robust_fit.baseline_s, track_span_m, robust_fit.rms_residual_m,
+                    (float) drift_vector.cog_x2 / 2.0f, sog_mps );
+}
+
+static bool mob_drift_get_vector( uint16_t *cog_x2, uint8_t *sog_dmps )
+{
+    if( cog_x2 == NULL || sog_dmps == NULL || !drift_vector.valid )
+    {
+        return false;
+    }
+
+    *cog_x2 = drift_vector.cog_x2;
+    *sog_dmps = drift_vector.sog_dmps;
+    return true;
+}
+
 static bool mob_send_position_uplink( const gnss_fix_t *fix, bool quality_ok, bool confirmed )
 {
     app_mob_dr_policy_t policy = APP_MOB_DR_PERSISTENCE;
@@ -355,6 +741,13 @@ static bool mob_send_position_with_policy( const gnss_fix_t *fix, bool quality_o
 {
     mob_position_uplink_t payload;
     bool on_charge = gateway_assistance_is_charging( );
+    uint16_t drift_cog_x2 = MOB_DRIFT_UNKNOWN_COG_X2;
+    uint8_t drift_sog_dmps = MOB_DRIFT_UNKNOWN_SOG_DMPS;
+    bool drift_valid;
+
+    mob_drift_update( fix );
+    drift_valid = fix->valid && mob_drift_get_vector( &drift_cog_x2, &drift_sog_dmps );
+
     memset( &payload, 0, sizeof( payload ));
     
     payload.data_id = DATA_ID_MOB_POSITION;
@@ -365,19 +758,25 @@ static bool mob_send_position_with_policy( const gnss_fix_t *fix, bool quality_o
     }
     payload.latitude = fix->latitude;
     payload.longitude = fix->longitude;
-    payload.hdop_x10 = (uint8_t)( fix->hdop * 10 );
-    if( payload.hdop_x10 > 255 ) payload.hdop_x10 = 255;
+    uint16_t hdop_x10 = (uint16_t)( fix->hdop * 10.0f );
+    payload.hdop_x10 = ( hdop_x10 > 255U ) ? 255U : (uint8_t) hdop_x10;
     
     payload.quality_flags = 0;
     if( fix->valid ) payload.quality_flags |= 0x01;
     if( quality_ok ) payload.quality_flags |= 0x02;
     if( on_charge ) payload.quality_flags |= MOB_QUALITY_FLAG_ON_CHARGE;
+    if( drift_valid ) payload.quality_flags |= MOB_QUALITY_FLAG_VECTOR;
     
     payload.battery = sensor_bat_sample( );
+    payload.cog_x2 = drift_valid ? drift_cog_x2 : MOB_DRIFT_UNKNOWN_COG_X2;
+    payload.sog_dmps = drift_valid ? drift_sog_dmps : MOB_DRIFT_UNKNOWN_SOG_DMPS;
     
-    MOB_TRACE_INFO( "MOB uplink: lat=%ld, lon=%ld, HDOP=%.1f, qual=%02X, batt=%d%%, on_charge=%u\n",
+    MOB_TRACE_INFO( "MOB uplink: lat=%ld, lon=%ld, HDOP=%.1f, qual=%02X, batt=%d%%, on_charge=%u, drift=%s COG=%.1f SOG=%.1f\n",
                    payload.latitude, payload.longitude, 
-                   fix->hdop, payload.quality_flags, payload.battery, on_charge ? 1 : 0 );
+                   fix->hdop, payload.quality_flags, payload.battery, on_charge ? 1 : 0,
+                   drift_valid ? "valid" : "unknown",
+                   drift_valid ? (float) payload.cog_x2 / 2.0f : -1.0f,
+                   drift_valid ? (float) payload.sog_dmps / 10.0f : -1.0f );
     
     if( tracker_state.mode == MOB_MODE_BURST && initial_burst_sent == false )
     {

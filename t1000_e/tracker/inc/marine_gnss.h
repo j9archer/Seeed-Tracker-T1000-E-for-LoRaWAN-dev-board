@@ -107,8 +107,10 @@ typedef struct __attribute__((packed)) {
     int32_t  latitude;      // Latitude * 1e6
     int32_t  longitude;     // Longitude * 1e6
     uint8_t  hdop_x10;      // HDOP * 10 (e.g., 15 = HDOP 1.5)
-    uint8_t  quality_flags; // Bit 0: fix_valid, Bit 1: quality_ok
+    uint8_t  quality_flags; // Bit 0: fix_valid, Bit 1: quality_ok, Bit 3: COG/SOG valid
     int8_t   battery;       // Battery percentage
+    uint16_t cog_x2;        // Firmware-derived course over ground, degrees * 2; 0xFFFF unknown
+    uint8_t  sog_dmps;      // Firmware-derived speed over ground, 0.1 m/s; 0xFF unknown
 } mob_position_uplink_t;
 
 /*

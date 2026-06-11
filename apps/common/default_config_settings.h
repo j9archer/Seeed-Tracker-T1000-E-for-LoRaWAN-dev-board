@@ -46,4 +46,42 @@
 #define REMEX_DEFAULT_IBEACON_SCAN_TIMEOUT_S   6
 #define REMEX_DEFAULT_GROUP_UUID_LEN           0
 
+/*
+ * PIW drift-vector estimation knobs.
+ *
+ * COG/SOG should be estimated from a short history of noisy GNSS fixes rather
+ * than from instantaneous receiver COG or from only the last two points. These
+ * values tune the firmware's robust weighted line fit:
+ *
+ * - FIX_WINDOW: number of valid PIW fixes retained in the sliding window.
+ * - MIN_FIXES: minimum fixes after outlier rejection before a vector is emitted.
+ * - MIN_BASELINE_S: minimum elapsed time covered by retained fixes.
+ * - DUPLICATE_FIX_S: ignore repeat samples with identical coordinates inside
+ *   this interval. This prevents PIW double-uplinks from being counted as two
+ *   independent GNSS fixes.
+ * - MIN_TRACK_SPAN_M: minimum fitted movement over that baseline. This keeps
+ *   COG from becoming authoritative when the fitted motion is still dominated
+ *   by position noise.
+ * - UERE_M: fallback user-equivalent range error. If GST/HACC is unavailable,
+ *   sigma is estimated as HDOP * UERE.
+ * - SIGMA_FLOOR/CEILING_M: bounds for each fix's sigma. Poor fixes remain in
+ *   the fit but receive lower weight; the ceiling prevents them becoming zero
+ *   weight.
+ * - OUTLIER_SIGMA/MARGIN_M: track-residual gate used in the robust second pass.
+ *   A fix is rejected from the final fit only when its residual from the
+ *   provisional fitted track is greater than sigma * OUTLIER_SIGMA + MARGIN.
+ * - MAX_TRACK_SPEED_MPS: final sanity limit for PIW drift.
+ */
+#define REMEX_PIW_DRIFT_FIX_WINDOW             10
+#define REMEX_PIW_DRIFT_MIN_FIXES              3
+#define REMEX_PIW_DRIFT_MIN_BASELINE_S         90
+#define REMEX_PIW_DRIFT_DUPLICATE_FIX_S        15
+#define REMEX_PIW_DRIFT_MIN_TRACK_SPAN_M       25.0f
+#define REMEX_PIW_DRIFT_UERE_M                 5.0f
+#define REMEX_PIW_DRIFT_SIGMA_FLOOR_M          5.0f
+#define REMEX_PIW_DRIFT_SIGMA_CEILING_M        80.0f
+#define REMEX_PIW_DRIFT_OUTLIER_SIGMA          3.0f
+#define REMEX_PIW_DRIFT_OUTLIER_MARGIN_M       15.0f
+#define REMEX_PIW_DRIFT_MAX_TRACK_SPEED_MPS    5.0f
+
 #endif /* DEFAULT_CONFIG_SETTINGS_H */
