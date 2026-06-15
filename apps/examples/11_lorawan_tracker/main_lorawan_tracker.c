@@ -35,6 +35,8 @@
 #include "wifi_scan.h"
 #include "gateway_assistance.h"
 #include "marine_gnss.h"
+#include "crew_payload_schema.h"
+#include "ag3335.h"
 #include "firmware_version.h"
 #include "log_filter.h"
 
@@ -53,6 +55,8 @@
 #define CREW_HP_CHANNEL_FREQ_HZ     869525000
 #define CREW_HP_CHANNEL_DR          3
 #define CREW_BLE_UPLINK_RECORD_LEN  5
+#define CREW_SOS_CONTEXT_SUBTYPE    0x23
+#define CREW_SOS_CONTEXT_SCHEMA     0x10
 #define STARTUP_SERIAL_DELAY_MS     5000
 
 /* Fleet de-synchronisation windows. All are deterministic per DevEUI, so a tag keeps
@@ -151,6 +155,13 @@ static uint8_t adr_custom_list_ru864_default[16] = { 0, 0, 0, 1, 1, 1, 2, 2, 2, 
 static uint8_t tracker_scan_status = 0;
 static uint32_t tracker_scan_begin = 0;
 static uint32_t last_time_sync_s = 0;  // Track last DeviceTimeReq for periodic resync
+static bool device_time_req_pending = false;
+static bool sos_gnss_prestarted = false;
+static bool app_gnss_initialized = false;
+static bool gnss_proof_scan_active = false;
+static bool gnss_proof_pending = false;
+static bool gnss_proof_quality_ok = false;
+static gnss_fix_t gnss_proof_fix = { 0 };
 
 uint8_t tracker_scan_type = 0;
 
@@ -289,7 +300,6 @@ static bool app_send_frame_on_port_ext( uint8_t port, const uint8_t* buffer, con
                                         bool emergency, uint8_t extended_id );
 static bool crew_send_dr_burst_on_port( uint8_t port, const uint8_t* buffer, const uint8_t length, bool tx_confirmed,
                                         bool emergency );
-static void app_tracker_append_location_age( void );
 static void crew_dr_configure_for_region( smtc_modem_region_t region );
 static bool crew_dr_apply_fixed( uint8_t dr );
 static bool crew_dr_prepare_next_uplink( uint8_t dr );
@@ -310,6 +320,15 @@ static uint16_t crew_dev_eui_phase_uplinks( uint32_t purpose, uint16_t interval 
 static void crew_wait_startup_first_uplink_jitter( void );
 static void crew_extended_uplink_done( void );
 static void remex_prepare_abp_config_for_ble_app( void );
+static bool app_tracker_is_sos_event( void );
+static bool app_tracker_payload_is_sos_context( const uint8_t* buffer, uint8_t length );
+static bool app_tracker_send_compact_presence( uint8_t outgoing_event_state, int8_t battery, bool confirm );
+static bool app_tracker_send_gnss_proof( uint8_t outgoing_event_state, int8_t battery, bool confirm );
+static bool app_tracker_send_sos_context( uint8_t outgoing_event_state, int8_t battery, bool confirm );
+static void app_tracker_sos_gnss_prestart( void );
+static uint32_t app_tracker_gnss_next_delay( void );
+static void app_tracker_u16_le( uint8_t* buffer, uint16_t value );
+static void app_tracker_i32_le( uint8_t* buffer, int32_t value );
 
 /*!
  * @}
@@ -389,6 +408,7 @@ int main( void )
         || tracker_scan_type == TRACKER_SCAN_BLE_WIFI_GNSS )
     {
         gnss_init( );
+        app_gnss_initialized = true;
         gnss_scan_start( );
         hal_mcu_wait_ms( 3000 );
         gnss_scan_stop( );
@@ -1539,14 +1559,44 @@ static void on_modem_network_joined( void )
 
     app_led_bat_new_detect( 3000 );
 
+    /*
+     * Use the startup jitter window for docked GNSS/almanac maintenance before
+     * the first routine uplink. Steady-state maintenance still runs between
+     * TXDONE and the next routine charger uplink.
+     */
+    gateway_assistance_check_charge_state();
+
     crew_wait_startup_first_uplink_jitter( );
+    if( gateway_assistance_is_background_gnss_active( ))
+    {
+        /*
+         * MDR-022: stop or pause GNSS before LoRa TX so AG3335 and LR11xx
+         * high-current paths do not overlap. The first power-on uplink is sent
+         * before normal TXDONE maintenance scheduling has had a chance to run.
+         */
+        LOG_LORA( "Startup uplink: pausing background GNSS before first LoRa TX\n" );
+        gateway_assistance_stop_background_gnss( );
+    }
     app_lora_packet_power_on_uplink( );
 
-    /* Start DeviceTimeReq time sync service and trigger request */
-    ASSERT_SMTC_MODEM_RC( smtc_modem_time_start_sync_service( stack_id, SMTC_MODEM_TIME_MAC_SYNC ) );
-    ASSERT_SMTC_MODEM_RC( smtc_modem_time_trigger_sync_request( stack_id ) );
-    last_time_sync_s = hal_rtc_get_time_s();  // Track when we synced
-    HAL_DBG_TRACE_INFO( "DeviceTimeReq triggered after join\n" );
+    /* Start DeviceTimeReq time sync service and trigger request. This is best-effort:
+     * the first status uplink may already be queued, so BUSY/FAIL must not destabilize startup.
+     */
+    smtc_modem_return_code_t time_rc = smtc_modem_time_start_sync_service( stack_id, SMTC_MODEM_TIME_MAC_SYNC );
+    if(( time_rc == SMTC_MODEM_RC_OK ) || ( time_rc == SMTC_MODEM_RC_FAIL ))
+    {
+        time_rc = smtc_modem_time_trigger_sync_request( stack_id );
+    }
+    if( time_rc == SMTC_MODEM_RC_OK )
+    {
+        last_time_sync_s = hal_rtc_get_time_s();  // Track when we requested sync
+        device_time_req_pending = true;
+        HAL_DBG_TRACE_INFO( "DeviceTimeReq triggered after join\n" );
+    }
+    else
+    {
+        HAL_DBG_TRACE_INFO( "DeviceTimeReq deferred after join (modem rc=%u)\n", time_rc );
+    }
 
     ASSERT_SMTC_MODEM_RC( smtc_modem_alarm_start_timer( 15 ) );
 }
@@ -1557,16 +1607,32 @@ static void on_modem_alarm( void )
     ASSERT_SMTC_MODEM_RC( smtc_modem_get_status( stack_id, &modem_status ));
     modem_status_to_string( modem_status );
     
-    /* Check charge state for background GNSS mode */
-    gateway_assistance_check_charge_state();
+    /*
+     * If background GNSS is already running from the previous TXDONE, refresh
+     * its charger/almanac state before routine scanning. Do not start it here:
+     * maintenance is scheduled after uplinks so indoor or stale-almanac tags
+     * still send their normal status every interval.
+     */
+    if( gateway_assistance_is_background_gnss_active() )
+    {
+        gateway_assistance_check_charge_state();
+    }
     
     /* Periodic time sync every 2 hours (7200 seconds) */
     uint32_t current_time_s = hal_rtc_get_time_s();
     if( last_time_sync_s > 0 && (current_time_s - last_time_sync_s) >= 7200 )
     {
         HAL_DBG_TRACE_INFO( "Triggering periodic DeviceTimeReq (2 hour interval)\n" );
-        ASSERT_SMTC_MODEM_RC( smtc_modem_time_trigger_sync_request( stack_id ) );
-        last_time_sync_s = current_time_s;  // Update even if request fails, retry in 4h
+        smtc_modem_return_code_t time_rc = smtc_modem_time_trigger_sync_request( stack_id );
+        if( time_rc == SMTC_MODEM_RC_OK )
+        {
+            device_time_req_pending = true;
+            last_time_sync_s = current_time_s;
+        }
+        else
+        {
+            HAL_DBG_TRACE_INFO( "Periodic DeviceTimeReq deferred (modem rc=%u)\n", time_rc );
+        }
     }
     
     app_tracker_scan_process( );
@@ -1585,6 +1651,21 @@ static void on_modem_tx_done( smtc_modem_event_txdone_status_t status )
         }
     }
     event_state = 0;
+
+    /*
+     * Docked almanac maintenance runs between uplinks: start or continue it
+     * after LoRa TX has completed, then app_send_frame() pauses it just before
+     * the next routine charger uplink. This preserves status cadence even when
+     * the charger is indoors and PAIR550 remains stale.
+     */
+    if( device_time_req_pending )
+    {
+        HAL_DBG_TRACE_INFO( "Charging GNSS maintenance deferred: DeviceTimeReq pending\n" );
+    }
+    else
+    {
+        gateway_assistance_check_charge_state();
+    }
 }
 
 static void on_modem_time_updated( smtc_modem_event_time_status_t status )
@@ -1618,6 +1699,18 @@ static void on_modem_time_updated( smtc_modem_event_time_status_t status )
         HAL_DBG_TRACE_INFO( "Modem time is now synchronized with network\n" );
         HAL_DBG_TRACE_INFO( "========================\n" );
         
+        device_time_req_pending = false;
+
+        /*
+         * A pending DeviceTimeReq may have deferred charger GNSS maintenance to
+         * avoid a MAC-only LoRa TX while AG3335 is active. Start maintenance now
+         * that the time exchange has completed, then write PAIR590 if active.
+         */
+        if( gateway_assistance_is_charging() && !gateway_assistance_is_background_gnss_active() )
+        {
+            gateway_assistance_check_charge_state();
+        }
+
         /* Send time to GNSS if background mode is active (module already powered) */
         if( gateway_assistance_is_background_gnss_active() )
         {
@@ -1630,6 +1723,7 @@ static void on_modem_time_updated( smtc_modem_event_time_status_t status )
     }
     else
     {
+        device_time_req_pending = false;
         HAL_DBG_TRACE_WARNING( "Time sync event but failed to get time\n" );
     }
 }
@@ -1728,11 +1822,6 @@ static bool app_tracker_wifi_scan_end( void )
 
     uint8_t len_max = wifi_scan_max * 7;
     if( tracker_wifi_scan_len > len_max ) tracker_wifi_scan_len = len_max;
-    if( tracker_wifi_scan_len && ( tracker_wifi_scan_len < len_max ) )
-    {
-        memset( tracker_wifi_scan_data + tracker_wifi_scan_len, 0xFF, len_max - tracker_wifi_scan_len );
-        tracker_wifi_scan_len = len_max;
-    }
     if( tracker_wifi_scan_len ) scan_result_num ++;
     if( scan_result_num > 3 ) scan_result_num = 3;
     if( tracker_test_mode == 0 && tracker_wifi_scan_len ) scan_result = true;
@@ -1749,8 +1838,12 @@ static bool app_tracker_gnss_scan_begin( void )
 
     if(( event_state & TRACKER_STATE_BIT7_SOS ) == 0 )
     {
-        LOG_GNSS( "routine GNSS fallback suppressed - not in SOS state\n\n" );
-        return false;
+        LOG_GNSS( "GNSS proof begin - local RF failed, checking vessel geofence position\n\n" );
+        gnss_proof_scan_active = gnss_scan_start( );
+        gnss_proof_pending = false;
+        gnss_proof_quality_ok = false;
+        memset( &gnss_proof_fix, 0, sizeof( gnss_proof_fix ));
+        return gnss_proof_scan_active;
     }
     
     // Activate marine_gnss quality-driven scanning
@@ -1771,6 +1864,40 @@ static bool app_tracker_gnss_scan_begin( void )
 
 static void app_tracker_gnss_scan_end( void )
 {
+    if( gnss_proof_scan_active )
+    {
+        gnss_fix_t fix;
+        bool got_fix = false;
+
+        memset( &fix, 0, sizeof( fix ));
+        got_fix = gnss_get_quality_fix( &fix );
+        gnss_scan_stop( );
+        gnss_proof_scan_active = false;
+
+        if( got_fix && fix.valid )
+        {
+            gnss_proof_fix = fix;
+            gnss_proof_quality_ok = ( fix.hdop <= PIW_GNSS_MAX_HDOP ) && ( fix.hacc <= PIW_GNSS_MAX_HACC_M );
+            gnss_proof_pending = true;
+            tracker_gps_scan_len = 1;
+            scan_result = true;
+            gateway_assistance_store_own_fix( fix.latitude, fix.longitude );
+            LOG_GNSS( "GNSS proof fix: lat=%ld lon=%ld HDOP=%.1f HACC=%.1f sats=%u quality=%s\n",
+                      fix.latitude,
+                      fix.longitude,
+                      fix.hdop,
+                      fix.hacc,
+                      fix.satellites,
+                      gnss_proof_quality_ok ? "OK" : "MARGINAL" );
+        }
+        else
+        {
+            tracker_gps_scan_len = 0;
+            LOG_GNSS( "GNSS proof: no valid fix\n" );
+        }
+        return;
+    }
+
     // Marine GNSS handles its own uplinks via mob_send_position_uplink()
     // This function is kept for compatibility but marine_gnss manages GNSS lifecycle
     
@@ -1804,14 +1931,21 @@ static void app_tracker_gnss_scan_end( void )
     }
 }
 
+static uint32_t app_tracker_gnss_next_delay( void )
+{
+    if( mob_tracker_is_active( ))
+    {
+        return mob_tracker_process( );
+    }
+
+    return gnss_scan_duration > 0 ? gnss_scan_duration : 1;
+}
+
 static void app_tracker_scan_result_send( void )
 {
     bool send_ok = false;
     bool confirm = false;
-    int16_t temp = 0;
-    uint16_t light = 0;
     int8_t battery = 0;
-    int16_t ax = 0, ay = 0, az = 0;
     uint8_t outgoing_event_state = event_state | app_tracker_live_event_state_get( );
 
     if(( packet_policy == RETRY_STATE_1C ) || ( event_state == TRACKER_STATE_BIT8_USER ))
@@ -1823,150 +1957,46 @@ static void app_tracker_scan_result_send( void )
     tracker_scan_temp_len = 0;
 
     battery = sensor_bat_sample( );
-    temp = sensor_ntc_sample( );
-    light = sensor_lux_sample( );
-
-    if( tracker_acc_en )
-    {
-        qma6100p_read_raw_data( &ax, &ay, &az );
-    }
 
     PRINTF( "tracker_gps_scan_len: %d\r\n", tracker_gps_scan_len );
     PRINTF( "tracker_wifi_scan_len: %d\r\n", tracker_wifi_scan_len );
     PRINTF( "tracker_ble_scan_len: %d\r\n", tracker_ble_scan_len );
     PRINTF( "scan_result_num: %d\r\n", scan_result_num );
 
-    if( tracker_gps_scan_len == 0 && tracker_wifi_scan_len == 0 && tracker_ble_scan_len == 0 )
+    if( app_tracker_is_sos_event( ))
     {
         scan_result_num = 1;
-
-        if( tracker_acc_en )
+        send_ok = app_tracker_send_sos_context( outgoing_event_state, battery, confirm );
+        if( send_ok )
         {
-            tracker_scan_data_temp[0] = DATA_ID_UP_PACKET_SEN_ACC_BAT;
+            tracker_gps_scan_len = 0;
+            tracker_wifi_scan_len = 0;
+            tracker_ble_scan_len = 0;
         }
-        else
-        {
-            tracker_scan_data_temp[0] = DATA_ID_UP_PACKET_SEN_BAT;
-        }
-        
-        tracker_scan_data_temp[1] = outgoing_event_state;
-        tracker_scan_data_temp[2] = battery;
-        memcpyr( tracker_scan_data_temp + 3, ( uint8_t *)( &temp ), 2 );
-        memcpyr( tracker_scan_data_temp + 5, ( uint8_t *)( &light ), 2 );
-        tracker_scan_temp_len += 7;
-
-        if( tracker_acc_en )
-        {
-            memcpyr( tracker_scan_data_temp + 7, ( uint8_t *)( &ax ), 2 );
-            memcpyr( tracker_scan_data_temp + 9, ( uint8_t *)( &ay ), 2 );
-            memcpyr( tracker_scan_data_temp + 11, ( uint8_t *)( &az ), 2 );
-            tracker_scan_temp_len += 6;
-        }
-
-        app_tracker_append_location_age( );
-        send_ok = app_send_frame( tracker_scan_data_temp, tracker_scan_temp_len, confirm, false );
     }
-    else if( tracker_gps_scan_len )
+    else
+    if( gnss_proof_pending )
     {
-        if( tracker_acc_en )
+        scan_result_num = 1;
+        send_ok = app_tracker_send_gnss_proof( outgoing_event_state, battery, confirm );
+        if( send_ok )
         {
-            tracker_scan_data_temp[0] = DATA_ID_UP_PACKET_GPS_SEN_ACC_BAT;
+            gnss_proof_pending = false;
+            tracker_gps_scan_len = 0;
+            tracker_wifi_scan_len = 0;
+            tracker_ble_scan_len = 0;
         }
-        else
-        {
-            tracker_scan_data_temp[0] = DATA_ID_UP_PACKET_GPS_SEN_BAT;
-        }
-
-        tracker_scan_data_temp[1] = outgoing_event_state;
-        tracker_scan_data_temp[2] = battery;
-        memcpyr( tracker_scan_data_temp + 3, ( uint8_t *)( &temp ), 2 );
-        memcpyr( tracker_scan_data_temp + 5, ( uint8_t *)( &light ), 2 );
-        tracker_scan_temp_len += 7;
-
-        if( tracker_acc_en )
-        {
-            memcpyr( tracker_scan_data_temp + 7, ( uint8_t *)( &ax ), 2 );
-            memcpyr( tracker_scan_data_temp + 9, ( uint8_t *)( &ay ), 2 );
-            memcpyr( tracker_scan_data_temp + 11, ( uint8_t *)( &az ), 2 );
-            tracker_scan_temp_len += 6;
-        }
-
-        memcpy( tracker_scan_data_temp + tracker_scan_temp_len, tracker_gps_scan_data, tracker_gps_scan_len );
-        tracker_scan_temp_len += tracker_gps_scan_len;
-
-        app_tracker_append_location_age( );
-        send_ok = app_send_frame( tracker_scan_data_temp, tracker_scan_temp_len, confirm, false );
-        if( send_ok ) tracker_gps_scan_len = 0;
     }
-    else if( tracker_wifi_scan_len )
+    else
     {
-        if( tracker_acc_en )
+        scan_result_num = 1;
+        send_ok = app_tracker_send_compact_presence( outgoing_event_state, battery, confirm );
+        if( send_ok )
         {
-            tracker_scan_data_temp[0] = DATA_ID_UP_PACKET_WIFI_SEN_ACC_BAT;
+            tracker_gps_scan_len = 0;
+            tracker_wifi_scan_len = 0;
+            tracker_ble_scan_len = 0;
         }
-        else
-        {
-            tracker_scan_data_temp[0] = DATA_ID_UP_PACKET_WIFI_SEN_BAT;
-        }
-
-        tracker_scan_data_temp[1] = outgoing_event_state;
-        tracker_scan_data_temp[2] = battery;
-        memcpyr( tracker_scan_data_temp + 3, ( uint8_t *)( &temp ), 2 );
-        memcpyr( tracker_scan_data_temp + 5, ( uint8_t *)( &light ), 2 );
-        tracker_scan_temp_len += 7;
-
-        if( tracker_acc_en )
-        {
-            memcpyr( tracker_scan_data_temp + 7, ( uint8_t *)( &ax ), 2 );
-            memcpyr( tracker_scan_data_temp + 9, ( uint8_t *)( &ay ), 2 );
-            memcpyr( tracker_scan_data_temp + 11, ( uint8_t *)( &az ), 2 );
-            tracker_scan_temp_len += 6;
-        }
-
-        tracker_scan_data_temp[tracker_scan_temp_len] = tracker_wifi_scan_len / 7;
-        tracker_scan_temp_len += 1;
-
-        memcpy( tracker_scan_data_temp + tracker_scan_temp_len, tracker_wifi_scan_data, tracker_wifi_scan_len );
-        tracker_scan_temp_len += tracker_wifi_scan_len;
-
-        app_tracker_append_location_age( );
-        send_ok = app_send_frame( tracker_scan_data_temp, tracker_scan_temp_len, confirm, false );
-        if( send_ok ) tracker_wifi_scan_len = 0;
-    }
-    else if( tracker_ble_scan_len )
-    {
-        if( tracker_acc_en )
-        {
-            tracker_scan_data_temp[0] = DATA_ID_UP_PACKET_CUSTOM_BLE_SEN_ACC_BAT;
-        }
-        else
-        {
-            tracker_scan_data_temp[0] = DATA_ID_UP_PACKET_CUSTOM_BLE_SEN_BAT;
-        }
-        
-        tracker_scan_data_temp[1] = outgoing_event_state;
-        tracker_scan_data_temp[2] = battery;
-        memcpyr( tracker_scan_data_temp + 3, ( uint8_t *)( &temp ), 2 );
-        memcpyr( tracker_scan_data_temp + 5, ( uint8_t *)( &light ), 2 );
-        tracker_scan_temp_len += 7;
-
-        if( tracker_acc_en )
-        {
-            memcpyr( tracker_scan_data_temp + 7, ( uint8_t *)( &ax ), 2 );
-            memcpyr( tracker_scan_data_temp + 9, ( uint8_t *)( &ay ), 2 );
-            memcpyr( tracker_scan_data_temp + 11, ( uint8_t *)( &az ), 2 );
-            tracker_scan_temp_len += 6;
-        }
-
-        tracker_scan_data_temp[tracker_scan_temp_len] = tracker_ble_scan_len / CREW_BLE_UPLINK_RECORD_LEN;
-        tracker_scan_temp_len += 1;
-
-        memcpy( tracker_scan_data_temp + tracker_scan_temp_len, tracker_ble_scan_data, tracker_ble_scan_len );
-        tracker_scan_temp_len += tracker_ble_scan_len;
-
-        app_tracker_append_location_age( );
-        send_ok = app_send_frame( tracker_scan_data_temp, tracker_scan_temp_len, confirm, false );
-        if( send_ok ) tracker_ble_scan_len = 0;
     }
 
     crew_dr_after_vessel_uplink( send_ok );
@@ -1986,12 +2016,115 @@ static void app_tracker_scan_result_send( void )
     }
 }
 
-static void app_tracker_append_location_age( void )
+static bool app_tracker_send_compact_presence( uint8_t outgoing_event_state, int8_t battery, bool confirm )
 {
-    if( tracker_scan_temp_len < sizeof( tracker_scan_data_temp ) )
+    uint8_t payload[sizeof( crew_presence_compact_t ) + sizeof( crew_presence_wifi_ext_t )] = { 0 };
+    uint8_t len = 0;
+    uint8_t phase = CREW_PRESENCE_PHASE_ROUTINE;
+    uint8_t source_flags = CREW_SOURCE_NONE;
+    uint8_t source_type = CREW_SOURCE_NONE;
+
+    payload[len++] = CREW_PAYLOAD_SCHEMA_PHASE( CREW_PAYLOAD_SCHEMA_VERSION, phase );
+    payload[len++] = outgoing_event_state;
+    payload[len++] = (uint8_t)battery;
+    payload[len++] = gateway_assistance_get_location_age_min( );
+    payload[len++] = source_flags;
+
+    if( tracker_ble_scan_len >= CREW_BLE_UPLINK_RECORD_LEN )
     {
-        tracker_scan_data_temp[tracker_scan_temp_len++] = gateway_assistance_get_location_age_min( );
+        uint16_t major = 0;
+        uint16_t minor = 0;
+
+        phase = CREW_PRESENCE_PHASE_ONBOARD;
+        source_type = CREW_SOURCE_BLE;
+        source_flags = CREW_SOURCE_BLE | CREW_SOURCE_FLAG_ACCEPTED |
+                       CREW_SOURCE_FLAG_RSSI_PRESENT | CREW_SOURCE_FLAG_IDENTITY_PRESENT;
+
+        memcpyr( (uint8_t*)&major, tracker_ble_scan_data, 2 );
+        memcpyr( (uint8_t*)&minor, tracker_ble_scan_data + 2, 2 );
+        app_tracker_u16_le( payload + len, major );
+        len += 2;
+        app_tracker_u16_le( payload + len, minor );
+        len += 2;
+        payload[len++] = tracker_ble_scan_data[4];
     }
+    else if( tracker_wifi_scan_len >= 7 )
+    {
+        bool provisional = true;
+
+        for( uint8_t i = 0; i < 6; i++ )
+        {
+            if( tracker_wifi_scan_data[i] != 0xFF )
+            {
+                provisional = false;
+                break;
+            }
+        }
+
+        phase = CREW_PRESENCE_PHASE_ONBOARD;
+        source_type = provisional ? CREW_SOURCE_WIFI_PROVISIONAL : CREW_SOURCE_WIFI_FIXED;
+        source_flags = source_type | CREW_SOURCE_FLAG_ACCEPTED |
+                       CREW_SOURCE_FLAG_RSSI_PRESENT | CREW_SOURCE_FLAG_IDENTITY_PRESENT;
+
+        memcpy( payload + len, tracker_wifi_scan_data, 6 );
+        len += 6;
+        payload[len++] = tracker_wifi_scan_data[6];
+        payload[len++] = provisional ? 0x01 : 0x00;
+    }
+    else if( tracker_gps_scan_len > 0 )
+    {
+        phase = CREW_PRESENCE_PHASE_ONBOARD;
+        source_type = CREW_SOURCE_GNSS_OR_ASSISTANCE;
+        source_flags = CREW_SOURCE_GNSS_OR_ASSISTANCE | CREW_SOURCE_FLAG_ACCEPTED;
+    }
+
+    payload[0] = CREW_PAYLOAD_SCHEMA_PHASE( CREW_PAYLOAD_SCHEMA_VERSION, phase );
+    payload[4] = source_flags;
+
+    LOG_LORA( "Compact presence uplink: phase=%u source=%u len=%u loc_age=%u\n",
+              phase, source_type, len, payload[3] );
+
+    return app_send_frame( payload, len, confirm, false );
+}
+
+static bool app_tracker_send_gnss_proof( uint8_t outgoing_event_state, int8_t battery, bool confirm )
+{
+    uint8_t payload[sizeof( crew_gnss_proof_t )] = { 0 };
+    uint8_t len = 0;
+    uint8_t quality_flags = CREW_GNSS_PROOF_QUALITY_FIX_VALID;
+    uint16_t hdop_x10 = (uint16_t)( gnss_proof_fix.hdop * 10.0f );
+
+    if( gnss_proof_quality_ok )
+    {
+        quality_flags |= CREW_GNSS_PROOF_QUALITY_OK;
+    }
+    if( gateway_assistance_is_charging( ))
+    {
+        quality_flags |= CREW_GNSS_PROOF_QUALITY_ON_CHARGE;
+    }
+
+    payload[len++] = CREW_ALERT_SUBTYPE_GNSS_PROOF;
+    payload[len++] = CREW_PAYLOAD_SCHEMA_PHASE( CREW_PAYLOAD_SCHEMA_VERSION, CREW_PRESENCE_PHASE_UNCERTAIN );
+    payload[len++] = outgoing_event_state;
+    payload[len++] = (uint8_t)battery;
+    payload[len++] = gateway_assistance_get_location_age_min( );
+    payload[len++] = quality_flags;
+    payload[len++] = ( hdop_x10 > 255U ) ? 255U : (uint8_t)hdop_x10;
+    payload[len++] = gnss_proof_fix.satellites;
+    app_tracker_i32_le( payload + len, gnss_proof_fix.latitude );
+    len += 4;
+    app_tracker_i32_le( payload + len, gnss_proof_fix.longitude );
+    len += 4;
+
+    LOG_LORA( "GNSS proof uplink: lat=%ld lon=%ld HDOP=%.1f sats=%u quality=%02X len=%u\n",
+              gnss_proof_fix.latitude,
+              gnss_proof_fix.longitude,
+              gnss_proof_fix.hdop,
+              gnss_proof_fix.satellites,
+              quality_flags,
+              len );
+
+    return app_send_mob_frame( payload, len, confirm, APP_MOB_DR_PERSISTENCE );
 }
 
 static uint8_t app_tracker_live_event_state_get( void )
@@ -2002,8 +2135,217 @@ static uint8_t app_tracker_live_event_state_get( void )
     {
         live_state |= TRACKER_STATE_BIT3_ON_CHARGE;
     }
+    if( gnss_almanac_is_valid( ))
+    {
+        live_state |= TRACKER_STATE_BIT6_GNSS_READY;
+    }
 
     return live_state;
+}
+
+static bool app_tracker_is_sos_event( void )
+{
+    return ( event_state & TRACKER_STATE_BIT7_SOS ) != 0;
+}
+
+static bool app_tracker_payload_is_sos_context( const uint8_t* buffer, uint8_t length )
+{
+    return ( length >= 7 )
+        && ( buffer[0] == CREW_SOS_CONTEXT_SUBTYPE )
+        && (( buffer[1] & 0xF0 ) == CREW_SOS_CONTEXT_SCHEMA )
+        && (( buffer[2] & TRACKER_STATE_BIT7_SOS ) != 0 );
+}
+
+static void app_tracker_u16_le( uint8_t* buffer, uint16_t value )
+{
+    buffer[0] = (uint8_t)( value & 0xFF );
+    buffer[1] = (uint8_t)(( value >> 8 ) & 0xFF );
+}
+
+static void app_tracker_i32_le( uint8_t* buffer, int32_t value )
+{
+    uint32_t raw = (uint32_t)value;
+    buffer[0] = (uint8_t)( raw & 0xFF );
+    buffer[1] = (uint8_t)(( raw >> 8 ) & 0xFF );
+    buffer[2] = (uint8_t)(( raw >> 16 ) & 0xFF );
+    buffer[3] = (uint8_t)(( raw >> 24 ) & 0xFF );
+}
+
+static bool app_tracker_send_sos_context( uint8_t outgoing_event_state, int8_t battery, bool confirm )
+{
+    uint8_t payload[LORAWAN_APP_DATA_MAX_SIZE];
+    uint8_t len = 0;
+    uint8_t source_flags = 0;
+    uint8_t evidence_flags = 0;
+    uint8_t reason = 0;
+    bool local_source_accepted = false;
+    bool background_active = gateway_assistance_is_background_gnss_active( );
+    bool prestarted_active = sos_gnss_prestarted && gnss_is_active( );
+    bool gnss_active_for_sos = background_active || prestarted_active || gnss_is_active( );
+    gnss_fix_t fix;
+    bool got_good_fix = false;
+
+    memset( &fix, 0, sizeof( fix ));
+
+    if(( tracker_scan_type == TRACKER_SCAN_BLE_ONLY )
+       || ( tracker_scan_type == TRACKER_SCAN_BLE_WIFI )
+       || ( tracker_scan_type == TRACKER_SCAN_BLE_GNSS )
+       || ( tracker_scan_type == TRACKER_SCAN_BLE_WIFI_GNSS )
+       || ( tracker_ble_scan_len > 0 ))
+    {
+        evidence_flags |= 0x01;
+    }
+    if(( tracker_scan_type == TRACKER_SCAN_WIFI_ONLY )
+       || ( tracker_scan_type == TRACKER_SCAN_WIFI_GNSS )
+       || ( tracker_scan_type == TRACKER_SCAN_GNSS_WIFI )
+       || ( tracker_scan_type == TRACKER_SCAN_BLE_WIFI )
+       || ( tracker_scan_type == TRACKER_SCAN_BLE_WIFI_GNSS )
+       || ( tracker_wifi_scan_len > 0 ))
+    {
+        evidence_flags |= 0x02;
+    }
+
+    evidence_flags |= 0x04;
+
+    if( tracker_ble_scan_len >= CREW_BLE_UPLINK_RECORD_LEN )
+    {
+        source_flags = 0x01 | 0x08 | 0x10 | 0x20;
+        local_source_accepted = true;
+        evidence_flags |= 0x08;
+    }
+    else if( tracker_wifi_scan_len >= 7 )
+    {
+        bool provisional = true;
+        for( uint8_t i = 0; i < 6; i++ )
+        {
+            if( tracker_wifi_scan_data[i] != 0xFF )
+            {
+                provisional = false;
+                break;
+            }
+        }
+        source_flags = ( provisional ? 0x03 : 0x02 ) | 0x08 | 0x10 | 0x20;
+        local_source_accepted = true;
+        evidence_flags |= 0x08;
+    }
+
+    LOG_GNSS( "SOS GNSS context: sampling current GNSS fix after local scans\n\n" );
+    if( gnss_active_for_sos && gnss_get_quality_fix( &fix ))
+    {
+        got_good_fix = ( fix.hdop <= PIW_GNSS_MAX_HDOP ) && ( fix.hacc <= PIW_GNSS_MAX_HACC_M );
+        LOG_GNSS( "SOS GNSS context: fix sampled HDOP=%.1f HACC=%.1f sats=%u quality=%s\n\n",
+                  fix.hdop,
+                  fix.hacc,
+                  fix.satellites,
+                  got_good_fix ? "GOOD" : "MARGINAL" );
+    }
+    else
+    {
+        LOG_GNSS( "SOS GNSS context: no GNSS fix available at local scan completion\n\n" );
+    }
+    if( fix.valid )
+    {
+        evidence_flags |= 0x10;
+        gateway_assistance_store_own_fix( fix.latitude, fix.longitude );
+    }
+    if( got_good_fix )
+    {
+        evidence_flags |= 0x20;
+    }
+    if( !fix.valid )
+    {
+        evidence_flags |= 0x40;
+        reason = 5;
+    }
+    else if( !local_source_accepted )
+    {
+        source_flags = 0x04;
+    }
+
+    if( background_active )
+    {
+        LOG_GNSS( "SOS GNSS context: pausing background GNSS before LoRa TX\n\n" );
+        gateway_assistance_stop_background_gnss( );
+    }
+    else if( prestarted_active )
+    {
+        LOG_GNSS( "SOS GNSS context: stopping prestarted GNSS before LoRa TX\n\n" );
+        gnss_scan_stop( );
+    }
+    sos_gnss_prestarted = false;
+
+    payload[len++] = CREW_SOS_CONTEXT_SUBTYPE;
+    payload[len++] = CREW_SOS_CONTEXT_SCHEMA | 0x01;
+    payload[len++] = outgoing_event_state | TRACKER_STATE_BIT7_SOS;
+    payload[len++] = (uint8_t)battery;
+    payload[len++] = source_flags;
+    payload[len++] = evidence_flags;
+    payload[len++] = reason;
+
+    if( tracker_ble_scan_len >= CREW_BLE_UPLINK_RECORD_LEN )
+    {
+        uint16_t major = 0;
+        uint16_t minor = 0;
+
+        memcpyr( (uint8_t*)&major, tracker_ble_scan_data, 2 );
+        memcpyr( (uint8_t*)&minor, tracker_ble_scan_data + 2, 2 );
+        app_tracker_u16_le( payload + len, major );
+        len += 2;
+        app_tracker_u16_le( payload + len, minor );
+        len += 2;
+        payload[len++] = tracker_ble_scan_data[4];
+    }
+    else if( tracker_wifi_scan_len >= 7 )
+    {
+        memcpy( payload + len, tracker_wifi_scan_data, 6 );
+        len += 6;
+        payload[len++] = (( source_flags & 0x07 ) == 0x03 ) ? 0x01 : 0x00;
+        payload[len++] = tracker_wifi_scan_data[6];
+    }
+
+    if( fix.valid && ( len + 10 <= sizeof( payload )))
+    {
+        uint16_t hdop_x10 = (uint16_t)( fix.hdop * 10.0f );
+        app_tracker_i32_le( payload + len, fix.latitude );
+        len += 4;
+        app_tracker_i32_le( payload + len, fix.longitude );
+        len += 4;
+        payload[len++] = ( hdop_x10 > 255U ) ? 255U : (uint8_t)hdop_x10;
+        payload[len++] = fix.satellites;
+    }
+
+    LOG_LORA( "SOS context uplink: local=%u gnss_valid=%u good=%u no_fix=%u len=%u\n",
+              local_source_accepted ? 1 : 0,
+              fix.valid ? 1 : 0,
+              got_good_fix ? 1 : 0,
+              ( evidence_flags & 0x40 ) ? 1 : 0,
+              len );
+
+    return app_send_frame( payload, len, confirm, true );
+}
+
+static void app_tracker_sos_gnss_prestart( void )
+{
+    if( !app_tracker_is_sos_event( ))
+    {
+        return;
+    }
+
+    if( gateway_assistance_is_background_gnss_active( ) || gnss_is_active( ))
+    {
+        sos_gnss_prestarted = false;
+        LOG_GNSS( "SOS GNSS prestart: GNSS already active\n\n" );
+        return;
+    }
+
+    if( !app_gnss_initialized )
+    {
+        LOG_GNSS( "SOS GNSS prestart skipped: GNSS not initialized for current positioning mode\n\n" );
+        return;
+    }
+
+    LOG_GNSS( "SOS GNSS prestart: starting GNSS immediately on SOS enter\n\n" );
+    sos_gnss_prestarted = gnss_scan_start( );
 }
 
 static void app_tracker_scan_process( void )
@@ -2022,7 +2364,7 @@ static void app_tracker_scan_process( void )
             if( app_tracker_gnss_scan_begin( ))
             {
                 // Process first cycle and get next delay
-                uint32_t marine_delay = mob_tracker_process( );
+                uint32_t marine_delay = app_tracker_gnss_next_delay( );
                 smtc_modem_alarm_start_timer( marine_delay );
                 LOG_GNSS( "marine_gnss next alarm %lu s\n\n", marine_delay );
                 tracker_scan_status = 1;
@@ -2037,7 +2379,7 @@ static void app_tracker_scan_process( void )
             // Process marine_gnss state machine
             if( mob_tracker_is_active( ))
             {
-                uint32_t marine_delay = mob_tracker_process( );
+                uint32_t marine_delay = app_tracker_gnss_next_delay( );
                 smtc_modem_alarm_start_timer( marine_delay );
                 LOG_GNSS( "marine_gnss continuing, next alarm %lu s\n\n", marine_delay );
                 // Stay in status 1 until cancelled
@@ -2111,7 +2453,7 @@ static void app_tracker_scan_process( void )
                 LOG_GNSS( "marine_gnss begin\n\n" );
                 if( app_tracker_gnss_scan_begin( ))
                 {
-                    uint32_t marine_delay = mob_tracker_process( );
+                    uint32_t marine_delay = app_tracker_gnss_next_delay( );
                     smtc_modem_alarm_start_timer( marine_delay );
                     tracker_scan_status = 2;
                 }
@@ -2126,7 +2468,7 @@ static void app_tracker_scan_process( void )
             // Process marine_gnss state machine
             if( mob_tracker_is_active( ))
             {
-                uint32_t marine_delay = mob_tracker_process( );
+                uint32_t marine_delay = app_tracker_gnss_next_delay( );
                 smtc_modem_alarm_start_timer( marine_delay );
                 LOG_GNSS( "marine_gnss continuing, next alarm %lu s\n\n", marine_delay );
             }
@@ -2149,7 +2491,7 @@ static void app_tracker_scan_process( void )
             tracker_scan_begin = hal_rtc_get_time_s( );
             if( app_tracker_gnss_scan_begin( ))
             {
-                uint32_t marine_delay = mob_tracker_process( );
+                uint32_t marine_delay = app_tracker_gnss_next_delay( );
                 smtc_modem_alarm_start_timer( marine_delay );
                 tracker_scan_status = 1;
             }
@@ -2162,7 +2504,7 @@ static void app_tracker_scan_process( void )
         {
             if( mob_tracker_is_active( ))
             {
-                uint32_t marine_delay = mob_tracker_process( );
+                uint32_t marine_delay = app_tracker_gnss_next_delay( );
                 smtc_modem_alarm_start_timer( marine_delay );
                 LOG_GNSS( "marine_gnss continuing, next alarm %lu s\n\n", marine_delay );
             }
@@ -2299,7 +2641,7 @@ static void app_tracker_scan_process( void )
                 LOG_GNSS( "marine_gnss begin\n\n" );
                 if( app_tracker_gnss_scan_begin( ))
                 {
-                    uint32_t marine_delay = mob_tracker_process( );
+                    uint32_t marine_delay = app_tracker_gnss_next_delay( );
                     smtc_modem_alarm_start_timer( marine_delay );
                     tracker_scan_status = 2;
                 }
@@ -2313,7 +2655,7 @@ static void app_tracker_scan_process( void )
         {
             if( mob_tracker_is_active( ))
             {
-                uint32_t marine_delay = mob_tracker_process( );
+                uint32_t marine_delay = app_tracker_gnss_next_delay( );
                 smtc_modem_alarm_start_timer( marine_delay );
                 LOG_GNSS( "marine_gnss continuing, next alarm %lu s\n\n", marine_delay );
             }
@@ -2384,7 +2726,7 @@ static void app_tracker_scan_process( void )
                 LOG_GNSS( "marine_gnss begin\n\n" );
                 if( app_tracker_gnss_scan_begin( ))
                 {
-                    uint32_t marine_delay = mob_tracker_process( );
+                    uint32_t marine_delay = app_tracker_gnss_next_delay( );
                     smtc_modem_alarm_start_timer( marine_delay );
                     tracker_scan_status = 3;
                 }
@@ -2398,7 +2740,7 @@ static void app_tracker_scan_process( void )
         {
             if( mob_tracker_is_active( ))
             {
-                uint32_t marine_delay = mob_tracker_process( );
+                uint32_t marine_delay = app_tracker_gnss_next_delay( );
                 smtc_modem_alarm_start_timer( marine_delay );
                 LOG_GNSS( "marine_gnss continuing, next alarm %lu s\n\n", marine_delay );
             }
@@ -2496,9 +2838,10 @@ static bool app_send_frame_on_port_ext( uint8_t port, const uint8_t* buffer, con
 bool app_send_frame( const uint8_t* buffer, const uint8_t length, bool tx_confirmed, bool emergency )
 {
     bool tracker_scan_payload = ( length > 1 ) && ( buffer[0] != DATA_ID_UP_PACKET_POWER );
+    bool sos_context_payload = app_tracker_payload_is_sos_context( buffer, length );
     bool on_charge = gateway_assistance_is_charging( );
 
-    if( tracker_scan_payload && (( buffer[1] & TRACKER_STATE_BIT7_SOS ) != 0 ))
+    if(( tracker_scan_payload && (( buffer[1] & TRACKER_STATE_BIT7_SOS ) != 0 )) || sos_context_payload )
     {
         if( crew_dr_ready )
         {
@@ -2517,6 +2860,24 @@ bool app_send_frame( const uint8_t* buffer, const uint8_t length, bool tx_confir
     if( crew_dr_ready )
     {
         crew_dr_prepare_next_uplink( crew_dr.vessel_current );
+    }
+
+    if( gateway_assistance_is_background_gnss_active( ))
+    {
+        /*
+         * AG3335 and LR11xx TX are both high-current paths. Pause charger
+         * maintenance before every normal LoRa uplink, including the startup
+         * power-on packet, then TXDONE can restart maintenance if still needed.
+         */
+        LOG_LORA( "Normal uplink: pausing background GNSS before LoRa TX\n" );
+        gateway_assistance_stop_background_gnss( );
+    }
+    else if( gnss_is_active( ))
+    {
+        LOG_LORA( "Normal uplink: stopping active GNSS before LoRa TX\n" );
+        gnss_scan_stop( );
+        gnss_proof_scan_active = false;
+        sos_gnss_prestarted = false;
     }
 
     if( on_charge )
@@ -2595,6 +2956,7 @@ void app_tracker_new_run( uint8_t event )
         if(( modem_status & SMTC_MODEM_STATUS_JOINED ) == SMTC_MODEM_STATUS_JOINED )
         {
             smtc_modem_alarm_clear_timer( );
+            app_tracker_sos_gnss_prestart( );
             smtc_modem_alarm_start_timer( 1 );
             hal_sleep_exit( );
         }

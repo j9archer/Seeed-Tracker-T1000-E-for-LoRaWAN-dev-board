@@ -49,6 +49,11 @@ bool gnss_scan_start( void );
 void gnss_scan_stop( void );
 
 /*!
+ * @brief Check whether the AG3335 scan/power path is currently active
+ */
+bool gnss_is_active( void );
+
+/*!
  * @brief Get gnss fix status
  * 
  * @return Fix status

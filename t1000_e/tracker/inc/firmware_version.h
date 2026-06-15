@@ -19,17 +19,24 @@ extern "C" {
 #define FIRMWARE_VERSION_MAJOR      1
 #define FIRMWARE_VERSION_MINOR      0
 #define FIRMWARE_VERSION_PATCH      0
-#define FIRMWARE_VERSION_BUILD      49
+#define FIRMWARE_VERSION_BUILD      51
 
-// Version string (e.g., "1.0.0-b49")
-#define FIRMWARE_VERSION_STRING     "1.0.0-b49"
+// Version string (e.g., "1.0.0-b51")
+#define FIRMWARE_VERSION_STRING     "1.0.0-b51"
 
 // Version features (changelog for this version)
-#define FIRMWARE_VERSION_FEATURES   "Restore production scan interval"
+#define FIRMWARE_VERSION_FEATURES   "Whitelist fixed WiFi AP MAC prefixes"
 
 /*
  * Version History:
  * 
+ * v1.0.0-b51 (2026-05-30)
+ *   - CHANGED: Fixed WiFi AP whitelist now matches configurable MAC prefixes instead of full BSSIDs
+ *
+ * v1.0.0-b50 (2026-05-30)
+ *   - ADDED: Build-time fixed WiFi AP MAC whitelist in default config settings
+ *   - CHANGED: Whitelisted WiFi BSSIDs bypass mobile/local-admin filtering and are accepted as fixed APs
+ *
  * v1.0.0-b49 (2026-05-30)
  *   - CHANGED: Removed WiFi test override so configured default uplink interval returns to 1 minute
  *   - REMOVED: Hardcoded temporary GNSS PAIR600 test position injection

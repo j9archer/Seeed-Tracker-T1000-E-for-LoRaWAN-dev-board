@@ -60,6 +60,13 @@ void gateway_assistance_stop_background_gnss(void);
 - **On charge**: Power consumption is not a concern - GNSS runs continuously
 - **On battery**: Background mode only activates when charging detected
 - **NVRAM persistence**: Almanac/ephemeris saved to AG3335 NVRAM, survives power cycles
+- **LoRa TX overlap**: Do not leave background GNSS running across routine LoRa
+  transmissions on charger power. Field logs showed startup resets when the
+  first charger-routed uplink fired while AG3335 was still active for almanac
+  maintenance. The firmware now pauses background GNSS before routine on-charge
+  uplinks, then restarts charger maintenance from the TXDONE handler if PAIR550
+  still reports stale almanac. This keeps routine BLE/status uplinks on cadence
+  even when the dock is indoors and the almanac cannot refresh.
 
 ## Network Time Sync
 

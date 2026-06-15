@@ -57,6 +57,7 @@ static uint32_t almanac_glonass_valid = 0;  // GLONASS satellites with valid alm
 static uint32_t almanac_beidou_valid = 0;   // BeiDou satellites with valid almanac  
 static uint32_t almanac_last_check_rtc = 0; // RTC timestamp of last almanac check
 static bool almanac_status_valid = false;   // True if we have valid almanac status
+static bool gnss_scan_active = false;
 
 // Forward declarations for functions used before their definitions
 static void gnss_scan_clean( void );
@@ -645,6 +646,7 @@ bool gnss_scan_start( void )
     // Query almanac status (1-day horizon check)
     gnss_check_almanac_status( );
 
+    gnss_scan_active = true;
     return true;
 }
 
@@ -658,6 +660,12 @@ void gnss_scan_stop( void )
     hal_gpio_set_value( AG3335_POWER_EN, HAL_GPIO_RESET );
     GNSS_TRACE_INFO( "GNSS: POWER_EN -> OFF (scan_stop)\n" );
     hal_uart_0_deinit( );
+    gnss_scan_active = false;
+}
+
+bool gnss_is_active( void )
+{
+    return gnss_scan_active;
 }
 
 static void gnss_scan_lock_sleep( void )

@@ -69,6 +69,7 @@ static bool last_charge_state = false;
 static uint8_t calculate_nmea_checksum(const char* sentence);
 static void gnss_power_on_for_command(void);
 static void gnss_power_off_after_command(void);
+static void gateway_assistance_report_charger_almanac_state(const char* prefix);
 
 /*
  * -----------------------------------------------------------------------------
@@ -231,6 +232,11 @@ uint32_t gateway_assistance_get_recommended_scan_duration(void)
 
 bool gateway_assistance_is_charging(void)
 {
+    /*
+     * "Charging" here means attached to external charger/dock power, not only
+     * actively accepting charge. A full battery still returns true via DONE
+     * or the charger-detect line so docked maintenance can continue.
+     */
     bool charger_inserted = (hal_gpio_get_value(CHARGER_ADC_DET) != 0);
     bool charge_active = (hal_gpio_get_value(CHARGER_CHRG) == 0);
     bool charge_done = (hal_gpio_get_value(CHARGER_DONE) == 0);
@@ -311,11 +317,15 @@ bool gateway_assistance_send_time_to_gnss(bool gnss_is_active)
              timeinfo.tm_hour,
              timeinfo.tm_min,
              timeinfo.tm_sec);
+
+    bool module_already_active = gnss_is_active || background_gnss_active;
     
     // Power cycle if GNSS not active
-    if (!gnss_is_active) {
+    if (!module_already_active) {
         HAL_DBG_TRACE_INFO("GNSS not active - powering on for PAIR590\n");
         gnss_power_on_for_command();
+    } else if (background_gnss_active) {
+        HAL_DBG_TRACE_INFO("Background GNSS active - sending time update (PAIR590)\n");
     }
     
     bool result = gnss_send_command(time_cmd);
@@ -333,7 +343,7 @@ bool gateway_assistance_send_time_to_gnss(bool gnss_is_active)
     }
     
     // Power off if we powered it on
-    if (!gnss_is_active) {
+    if (!module_already_active) {
         gnss_power_off_after_command();
     }
     
@@ -354,11 +364,15 @@ bool gateway_assistance_send_position_to_gnss(bool gnss_is_active)
              "$PAIR600,%.6f,%.6f,0.0,50.0,50.0,0.0,100.0",
              position_cache.latitude,
              position_cache.longitude);
+
+    bool module_already_active = gnss_is_active || background_gnss_active;
     
     // Power cycle if GNSS not active
-    if (!gnss_is_active) {
+    if (!module_already_active) {
         HAL_DBG_TRACE_INFO("GNSS not active - powering on for PAIR600\n");
         gnss_power_on_for_command();
+    } else if (background_gnss_active) {
+        HAL_DBG_TRACE_INFO("Background GNSS active - sending position update (PAIR600)\n");
     }
     
     bool result = gnss_send_command(pos_cmd);
@@ -372,7 +386,7 @@ bool gateway_assistance_send_position_to_gnss(bool gnss_is_active)
     }
     
     // Power off if we powered it on
-    if (!gnss_is_active) {
+    if (!module_already_active) {
         gnss_power_off_after_command();
     }
     
@@ -381,26 +395,27 @@ bool gateway_assistance_send_position_to_gnss(bool gnss_is_active)
 
 void gateway_assistance_store_own_fix(int32_t lat, int32_t lon)
 {
-    // Only update if no gateway data, or gateway data is very old
-    if (position_cache.valid) {
-        assistance_quality_t quality = gateway_assistance_get_quality();
-        if (quality != ASSISTANCE_POOR) {
-            // Gateway data is still good, don't override
-            return;
-        }
-    }
-    
-    // Store own GNSS fix as fallback assistance
+    uint32_t current_rtc = hal_rtc_get_time_s();
+
+    /*
+     * A receiver-derived valid fix is the best available position hint for the
+     * AG3335. Store it even if a gateway position is still fresh so Location Age
+     * resets to zero after a real fix. A later queued gateway-assist downlink may
+     * still overwrite this cache; that is acceptable because it represents the
+     * server's latest vessel/local-assist view.
+     */
     position_cache.latitude = lat / 1000000.0f;
     position_cache.longitude = lon / 1000000.0f;
-    position_cache.unix_time = hal_rtc_get_time_s();
-    position_cache.rtc_at_receipt = hal_rtc_get_time_s();
+    position_cache.unix_time = current_rtc;
+    position_cache.rtc_at_receipt = current_rtc;
     position_cache.time_uncertainty = gateway_assistance_get_time_uncertainty();
     position_cache.valid = true;
     
-    HAL_DBG_TRACE_INFO("Stored own GNSS fix as assistance: %.6f, %.6f\n",
+    HAL_DBG_TRACE_INFO("Stored own GNSS fix as assistance: %.6f, %.6f (Location Age reset)\n",
                        position_cache.latitude,
                        position_cache.longitude);
+
+    gateway_assistance_send_position_to_gnss(gnss_is_active());
 }
 
 bool gateway_assistance_is_gnss_ready(void)
@@ -473,16 +488,21 @@ bool gateway_assistance_should_check_almanac(void)
         return false;
     }
     
-    // Check if last almanac status check was more than 24 hours ago
     uint32_t last_check = gnss_almanac_get_last_check_time();
     uint32_t current_time = hal_rtc_get_time_s();
-    
-    // If never checked (last_check == 0) or >24 hours since last check
-    uint32_t hours_since_check = (current_time - last_check) / 3600;
-    
-    if (last_check == 0 || hours_since_check >= 24) {
-        HAL_DBG_TRACE_INFO("Almanac check due - %lu hours since last check (charging=%d)\n", 
-                           hours_since_check, 1);
+
+    if (last_check == 0) {
+        HAL_DBG_TRACE_INFO("Almanac check due - never checked while on charger\n");
+        return true;
+    }
+
+    uint32_t elapsed_s = current_time - last_check;
+    uint32_t recheck_interval_s = GATEWAY_ASSISTANCE_ALMANAC_RECHECK_INTERVAL_MIN * 60UL;
+
+    if (elapsed_s >= recheck_interval_s) {
+        HAL_DBG_TRACE_INFO("Almanac check due - %lu min since last check (interval=%u min)\n",
+                           elapsed_s / 60UL,
+                           GATEWAY_ASSISTANCE_ALMANAC_RECHECK_INTERVAL_MIN);
         return true;
     }
     
@@ -604,6 +624,19 @@ static void gnss_power_off_after_command(void)
     HAL_DBG_TRACE_INFO("AG3335 powered off after NVRAM command\n");
 }
 
+static void gateway_assistance_report_charger_almanac_state(const char* prefix)
+{
+    uint8_t sv_count = gnss_almanac_get_valid_sv_count();
+
+    if (gnss_almanac_needs_maintenance()) {
+        HAL_DBG_TRACE_INFO("%s: almanac stale (%u SVs); GNSS maintenance needed\n",
+                           prefix, sv_count);
+    } else {
+        HAL_DBG_TRACE_INFO("%s: almanac healthy (%u SVs); GNSS maintenance complete\n",
+                           prefix, sv_count);
+    }
+}
+
 /*
  * -----------------------------------------------------------------------------
  * --- BACKGROUND GNSS MODE (Charging/Docked) ---------------------------------
@@ -613,17 +646,53 @@ static void gnss_power_off_after_command(void)
 void gateway_assistance_check_charge_state(void)
 {
     bool current_charge_state = gateway_assistance_is_charging();
-    
-    // Detect charge state transitions
-    if (current_charge_state && !last_charge_state) {
-        // Just connected to charger - start background GNSS
-        HAL_DBG_TRACE_INFO("=== CHARGE CONNECTED - Starting background GNSS ===\n");
-        gateway_assistance_start_background_gnss();
-    }
-    else if (!current_charge_state && last_charge_state) {
+
+    if (!current_charge_state && last_charge_state) {
         // Just disconnected from charger - stop background GNSS
         HAL_DBG_TRACE_INFO("=== CHARGE DISCONNECTED - Stopping background GNSS ===\n");
         gateway_assistance_stop_background_gnss();
+        last_charge_state = current_charge_state;
+        return;
+    }
+
+    if (current_charge_state) {
+        bool almanac_needs_maintenance = gnss_almanac_needs_maintenance();
+        bool check_due = gateway_assistance_should_check_almanac();
+        bool started_background = false;
+        bool refreshed_status = false;
+
+        /*
+         * While docked, PAIR550 status drives receiver state:
+         * - stale/unknown almanac keeps background GNSS active for download
+         * - healthy almanac lets us stop GNSS and only wake at the recheck interval
+         */
+        if (!background_gnss_active && (almanac_needs_maintenance || check_due)) {
+            if (!last_charge_state) {
+                HAL_DBG_TRACE_INFO("=== CHARGE CONNECTED - Checking almanac with background GNSS ===\n");
+            } else {
+                HAL_DBG_TRACE_INFO("=== CHARGE PRESENT - Almanac recheck starting background GNSS ===\n");
+            }
+
+            gateway_assistance_start_background_gnss();
+            almanac_needs_maintenance = gnss_almanac_needs_maintenance();
+            started_background = true;
+        } else if (background_gnss_active && check_due) {
+            HAL_DBG_TRACE_INFO("Charging GNSS maintenance: refreshing almanac status\n");
+            gnss_almanac_refresh_status();
+            almanac_needs_maintenance = gnss_almanac_needs_maintenance();
+            refreshed_status = true;
+        }
+
+        if (background_gnss_active && !almanac_needs_maintenance) {
+            HAL_DBG_TRACE_INFO("Charging GNSS maintenance: almanac healthy; stopping background GNSS until next recheck\n");
+            gateway_assistance_stop_background_gnss();
+        } else if (background_gnss_active && almanac_needs_maintenance && (started_background || refreshed_status)) {
+            gateway_assistance_report_charger_almanac_state("Charging GNSS maintenance");
+            HAL_DBG_TRACE_INFO("Charging GNSS maintenance: keeping background GNSS active for almanac download\n");
+        } else if (!background_gnss_active && !almanac_needs_maintenance && !last_charge_state) {
+            gateway_assistance_report_charger_almanac_state("Charging GNSS maintenance");
+            HAL_DBG_TRACE_INFO("Charging GNSS maintenance: background GNSS remains off until next recheck\n");
+        }
     }
     
     last_charge_state = current_charge_state;
@@ -645,6 +714,15 @@ void gateway_assistance_start_background_gnss(void)
     
     // Start GNSS scan - this powers on the module and locks sleep
     gnss_scan_start();
+
+    if (gnss_almanac_needs_maintenance()) {
+        uint8_t sv_count = gnss_almanac_get_valid_sv_count();
+        HAL_DBG_TRACE_INFO("Background GNSS startup: almanac stale (%u SVs); keeping receiver active for download\n",
+                           sv_count);
+    } else {
+        uint8_t sv_count = gnss_almanac_get_valid_sv_count();
+        HAL_DBG_TRACE_INFO("Background GNSS startup: almanac healthy (%u SVs)\n", sv_count);
+    }
     
     // Enable NMEA debug for background mode monitoring
     gnss_enable_nmea_debug(true);
@@ -662,6 +740,23 @@ void gateway_assistance_stop_background_gnss(void)
     }
     
     HAL_DBG_TRACE_INFO("Stopping background GNSS mode\n");
+
+    gnss_fix_t fix;
+    if (gnss_get_quality_fix(&fix) && fix.valid) {
+        HAL_DBG_TRACE_INFO("Background GNSS stop: valid fix available, storing assistance position\n");
+        gateway_assistance_store_own_fix(fix.latitude, fix.longitude);
+    } else {
+        HAL_DBG_TRACE_INFO("Background GNSS stop: no valid fix to store\n");
+    }
+
+    /*
+     * Before pausing for LoRa TX, refresh PAIR550 while the AG3335 is still
+     * awake and has just been tracking. This captures a newly-good almanac
+     * state so TXDONE does not restart maintenance unnecessarily.
+     */
+    HAL_DBG_TRACE_INFO("Background GNSS stop: refreshing almanac status before pause\n");
+    gnss_almanac_refresh_status();
+    gateway_assistance_report_charger_almanac_state("Background GNSS stop");
     
     // Disable NMEA debug
     gnss_enable_nmea_debug(false);

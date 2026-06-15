@@ -6,6 +6,7 @@
 #include <string.h>
 #include "lr11xx_wifi.h"
 #include "lr11xx_system.h"
+#include "default_config_settings.h"
 #include "wifi_helpers.h"
 #include "smtc_hal_dbg_trace.h"
 
@@ -31,6 +32,10 @@
 
 static wifi_settings_t settings = { 0 };
 
+static const uint8_t wifi_fixed_ap_mac_prefix_whitelist[REMEX_WIFI_FIXED_AP_MAC_PREFIX_WHITELIST_COUNT]
+                                                       [REMEX_WIFI_FIXED_AP_MAC_PREFIX_LEN] =
+    REMEX_WIFI_FIXED_AP_MAC_PREFIX_WHITELIST;
+
 /*
  * -----------------------------------------------------------------------------
  * --- PRIVATE VARIABLES -------------------------------------------------------
@@ -54,6 +59,20 @@ static void smtc_wifi_log_basic_result( const char* label, uint8_t index,
     }
     HAL_DBG_TRACE_PRINTF( "Channel: %u, Type: %u, RSSI: %d, Origin: %u, RSSI valid: %u\r\n",
                           channel, type, result->rssi, origin, rssi_validity ? 1 : 0 );
+}
+
+static bool smtc_wifi_mac_prefix_is_fixed_ap_whitelisted( const lr11xx_wifi_mac_address_t mac_address )
+{
+    for( uint8_t index = 0; index < REMEX_WIFI_FIXED_AP_MAC_PREFIX_WHITELIST_COUNT; index++ )
+    {
+        if( memcmp( wifi_fixed_ap_mac_prefix_whitelist[index], mac_address,
+                    REMEX_WIFI_FIXED_AP_MAC_PREFIX_LEN ) == 0 )
+        {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 /*
@@ -193,7 +212,16 @@ bool smtc_wifi_get_results( const void* radio_context, wifi_scan_all_result_t* w
         HAL_DBG_TRACE_PRINTF( "WiFi raw result %u: origin=%u, rssi_valid=%u\r\n",
                               index, mac_origin_estimation, rssi_validity ? 1 : 0 );
 
-        if( mac_origin_estimation == LR11XX_WIFI_ORIGIN_BEACON_MOBILE_AP )
+        bool fixed_ap_whitelisted =
+            smtc_wifi_mac_prefix_is_fixed_ap_whitelisted( local_basic_result->mac_address );
+        if( fixed_ap_whitelisted )
+        {
+            smtc_wifi_log_basic_result( "WiFi allow whitelisted AP", index, local_basic_result, channel, signal_type,
+                                        mac_origin_estimation, rssi_validity );
+            wifi_results->whitelisted_results++;
+        }
+
+        if( ( fixed_ap_whitelisted == false ) && ( mac_origin_estimation == LR11XX_WIFI_ORIGIN_BEACON_MOBILE_AP ) )
         {
             smtc_wifi_log_basic_result( "WiFi reject mobile AP", index, local_basic_result, channel, signal_type,
                                         mac_origin_estimation, rssi_validity );
@@ -201,7 +229,7 @@ bool smtc_wifi_get_results( const void* radio_context, wifi_scan_all_result_t* w
             continue;
         }
 
-        if( ( local_basic_result->mac_address[0] & 0x02 ) != 0 )
+        if( ( fixed_ap_whitelisted == false ) && ( ( local_basic_result->mac_address[0] & 0x02 ) != 0 ) )
         {
             smtc_wifi_log_basic_result( "WiFi reject local-admin", index, local_basic_result, channel, signal_type,
                                         mac_origin_estimation, rssi_validity );

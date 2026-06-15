@@ -174,9 +174,10 @@ void wifi_display_results( void )
 {
     HAL_DBG_TRACE_PRINTF( "Number of results: %u accepted / %u raw\r\n",
                           wifi_results.nbr_results, wifi_results.raw_results );
-    HAL_DBG_TRACE_PRINTF( "WiFi scan filtered: mobile=%u, local_admin=%u, duplicate=%u, unknown_origin=%u\r\n",
+    HAL_DBG_TRACE_PRINTF( "WiFi scan filtered: mobile=%u, local_admin=%u, whitelist=%u, duplicate=%u, unknown_origin=%u\r\n",
                           wifi_results.mobile_ap_results, wifi_results.local_admin_results,
-                          wifi_results.duplicate_results, wifi_results.unknown_origin_results );
+                          wifi_results.whitelisted_results, wifi_results.duplicate_results,
+                          wifi_results.unknown_origin_results );
     HAL_DBG_TRACE_PRINTF( "WiFi scan power: %lu uAh (%lu nAh)\r\n",
                           wifi_results.power_consumption_uah, wifi_results.power_consumption_nah );
     HAL_DBG_TRACE_PRINTF( "WiFi scan timings: detect=%lu us, correlate=%lu us, capture=%lu us, demod=%lu us\r\n",

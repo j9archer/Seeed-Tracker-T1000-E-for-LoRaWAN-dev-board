@@ -87,6 +87,7 @@ typedef struct
     uint8_t                   raw_results;                //!< Number of raw results returned by LR11xx
     uint8_t                   mobile_ap_results;          //!< Number of raw results filtered as mobile APs
     uint8_t                   local_admin_results;        //!< Number of locally administered MACs filtered locally
+    uint8_t                   whitelisted_results;        //!< Number of raw results accepted by fixed AP whitelist
     uint8_t                   duplicate_results;          //!< Number of duplicate MACs filtered locally
     uint8_t                   unknown_origin_results;     //!< Number of accepted results with unknown AP origin
     uint32_t                  power_consumption_uah;      //!< Power consumption to acquire this set of results

@@ -38,6 +38,15 @@ extern "C" {
 /* LoRaWAN port for gateway assistance messages is defined in crew_lorawan_ports.h. */
 
 /*
+ * Minutes between PAIR550 almanac status rechecks while the tag is attached
+ * to charger/dock power and background GNSS is otherwise allowed to sleep.
+ * Override at build time or here for field tuning.
+ */
+#ifndef GATEWAY_ASSISTANCE_ALMANAC_RECHECK_INTERVAL_MIN
+#define GATEWAY_ASSISTANCE_ALMANAC_RECHECK_INTERVAL_MIN 10
+#endif
+
+/*
  * -----------------------------------------------------------------------------
  * --- PUBLIC CONSTANTS --------------------------------------------------------
  */
@@ -252,10 +261,10 @@ bool gateway_assistance_send_warm_start(void);
 bool gateway_assistance_send_hot_start(void);
 
 /*!
- * @brief Periodic almanac maintenance check (call every 24 hours while charging)
+ * @brief Periodic almanac maintenance check while charging
  *
- * When device is on charge, this should be called periodically (every 24 hours)
- * to check almanac status and perform maintenance if needed.
+ * When device is on charge, this can be called to check almanac status and
+ * perform maintenance if needed.
  *
  * The function will:
  * 1. Power on GNSS module
@@ -268,13 +277,15 @@ bool gateway_assistance_send_hot_start(void);
 bool gateway_assistance_periodic_almanac_maintenance(void);
 
 /*!
- * @brief Check if it's time for periodic almanac status check
+ * @brief Check if it's time for a charger almanac status recheck
  *
  * Returns true if:
  * - Device is on charge AND
- * - Last almanac check was >24 hours ago
+ * - Almanac was never checked, OR
+ * - Last almanac check is older than
+ *   GATEWAY_ASSISTANCE_ALMANAC_RECHECK_INTERVAL_MIN
  *
- * @returns true if periodic check should be performed
+ * @returns true if PAIR550 should be queried
  */
 bool gateway_assistance_should_check_almanac(void);
 
@@ -282,8 +293,10 @@ bool gateway_assistance_should_check_almanac(void);
  * -----------------------------------------------------------------------------
  * --- BACKGROUND GNSS MODE (Charging/Docked) ---------------------------------
  * -----------------------------------------------------------------------------
- * When device is charging/docked, we run continuous GNSS in background to
- * maintain almanac and ephemeris data. This coexists with normal tracking.
+ * When device is charging/docked, PAIR550 almanac status determines whether
+ * background GNSS should stay active. Stale/unknown almanac keeps the receiver
+ * awake for download; healthy almanac lets it sleep until the next configured
+ * recheck interval.
  */
 
 /*!
@@ -291,7 +304,9 @@ bool gateway_assistance_should_check_almanac(void);
  *
  * Call this periodically (e.g., in main loop or on alarm).
  * Detects charge state transitions and:
- * - On charge connect: Starts background GNSS scan
+ * - On charge connect: Starts/checks GNSS only if almanac is stale, unknown,
+ *   or due for recheck
+ * - While on charge: keeps GNSS active until PAIR550 reports healthy almanac
  * - On charge disconnect: Stops background GNSS scan
  *
  * When background mode is active, normal tracking scans can still run

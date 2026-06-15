@@ -84,4 +84,18 @@
 #define REMEX_PIW_DRIFT_OUTLIER_MARGIN_M       15.0f
 #define REMEX_PIW_DRIFT_MAX_TRACK_SPEED_MPS    5.0f
 
+/*
+ * Wi-Fi BSSID prefixes that should be treated as fixed vessel/gateway APs even
+ * when the radio driver reports a locally administered MAC address.
+ *
+ * The RAK/CM4 AP BSSID may be generated from the hardware OUI with the
+ * local-admin bit set, e.g. physical 2C:CF:67 -> AP BSSID 2E:CF:67.
+ */
+#define REMEX_WIFI_FIXED_AP_MAC_PREFIX_LEN             3
+#define REMEX_WIFI_FIXED_AP_MAC_PREFIX_WHITELIST_COUNT 1
+#define REMEX_WIFI_FIXED_AP_MAC_PREFIX_WHITELIST       \
+    {                                                  \
+        { 0x2E, 0xCF, 0x67 }                           \
+    }
+
 #endif /* DEFAULT_CONFIG_SETTINGS_H */

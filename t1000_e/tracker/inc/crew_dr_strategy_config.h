@@ -10,7 +10,7 @@
  * without changing the BLE configuration payload format.
  *
  * Decision summary:
- * - BLE Minor 1..5 is the installer's proposed LoRaWAN DR captured during the short pre-uplink scan.
+ * - BLE Minor 1..5 is a local RF hint captured during the short pre-uplink scan.
  * - BLE hints provide the fast initial DR selection when moving through the vessel.
  * - LinkCheckReq provides slower network validation using demodulation margin and gateway count.
  * - TX power hinting stays disabled for now; DR-only control is the tested path.
@@ -30,11 +30,10 @@
 #define CREW_DR_LINKCHECK_INTERVAL_WITH_HINT    60
 
 #define CREW_DR_LINKCHECK_LOW_MARGIN_DB         5
-#define CREW_DR_LINKCHECK_HIGH_MARGIN_DB        10
+#define CREW_DR_LINKCHECK_HIGH_MARGIN_DB        15
 /*
  * Approximate EU868 LoRa sensitivity cost per DR step around SF9..SF7 is 2.5-3 dB.
- * Keep 10 dB spare margin, then use 5 dB per DR step as a whole-system allowance
- * for antenna/body/vessel fading.
+ * Use 5 dB here as a conservative whole-system allowance for antenna/body/vessel fading.
  */
 #define CREW_DR_LINKCHECK_MARGIN_PER_DR_DB      5
 
