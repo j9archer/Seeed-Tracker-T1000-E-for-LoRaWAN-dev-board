@@ -99,6 +99,13 @@ void app_lora_packet_downlink_decode( uint8_t *buf, uint8_t len )
             }
             break;
 
+            case DATA_ID_DW_PACKET_POWER_OFF:
+            {
+                LOG_LORA( "lora power off\r\n" );
+                app_user_request_power_off( );
+            }
+            break;
+
             case DATA_ID_DW_PACKET_SOS_CONTINUOUS:
             {
                 if( buf[1] == 0 )

@@ -19,17 +19,22 @@ extern "C" {
 #define FIRMWARE_VERSION_MAJOR      1
 #define FIRMWARE_VERSION_MINOR      0
 #define FIRMWARE_VERSION_PATCH      0
-#define FIRMWARE_VERSION_BUILD      51
+#define FIRMWARE_VERSION_BUILD      52
 
-// Version string (e.g., "1.0.0-b51")
-#define FIRMWARE_VERSION_STRING     "1.0.0-b51"
+// Version string (e.g., "1.0.0-b52")
+#define FIRMWARE_VERSION_STRING     "1.0.0-b52"
 
 // Version features (changelog for this version)
-#define FIRMWARE_VERSION_FEATURES   "Whitelist fixed WiFi AP MAC prefixes"
+#define FIRMWARE_VERSION_FEATURES   "Disable button power-off and add LoRa power-off downlink"
 
 /*
  * Version History:
  * 
+ * v1.0.0-b52 (2026-06-16)
+ *   - CHANGED: Long press no longer powers off a running tag, but still powers on from firmware soft-off
+ *   - ADDED: LoRa downlink command 0x8E requests firmware soft power-off
+ *   - ADDED: Downlink command reference documentation
+ *
  * v1.0.0-b51 (2026-05-30)
  *   - CHANGED: Fixed WiFi AP whitelist now matches configurable MAC prefixes instead of full BSSIDs
  *

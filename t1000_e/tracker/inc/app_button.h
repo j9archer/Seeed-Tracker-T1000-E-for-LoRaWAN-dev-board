@@ -47,6 +47,11 @@ void app_sos_continuous_toggle_on( void );
 void app_sos_continuous_toggle_off( void );
 
 /*!
+ * @brief Request device power off from application control path
+ */
+void app_user_request_power_off( void );
+
+/*!
  * @brief Power off device
  */
 void app_user_power_off( void );

@@ -66,11 +66,10 @@ void app_user_button_event_timeout_handler( void* p_context )
             button_rise_time = 0;
             app_timer_stop( m_button_event_timer_id );
             // PRINTF( "\r\nBUTTON_PRESS_LONG\r\n\r\n" );
-            if( button_power ) // power off
+            if( button_power ) // power-off by button is disabled while running
             {
-                button_power = false;
-                new_power_off = true;
-                app_beep_power_off( );
+                button_long_det = false;
+                PRINTF( "\r\nBUTTON_POWER_OFF_DISABLED\r\n\r\n" );
             }
             else // power on
             {
@@ -371,6 +370,16 @@ void app_sos_continuous_toggle_off( void )
     app_led_idle( );
     app_timer_stop( m_sos_cnt_event_timer_id );
     PRINTF( "\r\nSOS_EXIT\r\n\r\n" );
+}
+
+void app_user_request_power_off( void )
+{
+    if( button_power )
+    {
+        button_power = false;
+        new_power_off = true;
+        app_beep_power_off( );
+    }
 }
 
 void app_user_power_off( void )

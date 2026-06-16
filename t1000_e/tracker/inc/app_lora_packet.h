@@ -30,6 +30,7 @@ extern "C" {
 #define DATA_ID_DW_PACKET_POWEWR_SEND       0x88
 #define DATA_ID_DW_PACKET_REBOOT            0x89
 #define DATA_ID_DW_PACKET_SOS_CONTINUOUS    0x8D
+#define DATA_ID_DW_PACKET_POWER_OFF         0x8E
 
 /*!
  * @brief Uplink power on message
