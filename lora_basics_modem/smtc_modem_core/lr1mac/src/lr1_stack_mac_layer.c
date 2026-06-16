@@ -141,6 +141,7 @@ void lr1_stack_mac_session_init( lr1_stack_mac_t* lr1_mac )
 {
     lr1_mac->fcnt_dwn                          = ~0;
     lr1_mac->fcnt_up                           = 0;
+    lr1_mac->fcnt_dwn_sync_pending             = false;
     lr1_mac->retry_join_cpt                    = 0;
     lr1_mac->no_rx_packet_count_in_mobile_mode = 0;
     lr1_mac->no_rx_packet_count                = 0;
@@ -848,6 +849,7 @@ rx_packet_type_t lr1_stack_mac_rx_frame_decode( lr1_stack_mac_t* lr1_mac )
         //               Case : the receive packet is not a JoinResponse
         //**********************************************************************
         uint16_t fcnt_dwn_tmp = 0;
+        bool     stale_fcnt_dwn_candidate = false;
 #if defined( PERF_TEST_ENABLED )
         fcnt_dwn_stack_tmp = 0;
 #else
@@ -858,7 +860,16 @@ rx_packet_type_t lr1_stack_mac_rx_frame_decode( lr1_stack_mac_t* lr1_mac )
                                           &( lr1_mac->rx_payload_empty ), &( lr1_mac->rx_fctrl ), lr1_mac->rx_fopts );
         if( status == OKLORAWAN )
         {
+            if( ( lr1_mac->fcnt_dwn != 0xFFFFFFFF ) &&
+                ( fcnt_dwn_tmp <= ( uint16_t )( lr1_mac->fcnt_dwn & 0x0000FFFF ) ) )
+            {
+                stale_fcnt_dwn_candidate = true;
+            }
             status = lr1mac_fcnt_dwn_accept( fcnt_dwn_tmp, &fcnt_dwn_stack_tmp );
+            if( ( status != OKLORAWAN ) && stale_fcnt_dwn_candidate )
+            {
+                lr1_mac->fcnt_dwn_sync_pending = true;
+            }
         }
         if( status == OKLORAWAN )
         {
@@ -869,6 +880,10 @@ rx_packet_type_t lr1_stack_mac_rx_frame_decode( lr1_stack_mac_t* lr1_mac )
                                               lr1_mac->dev_addr, 1, fcnt_dwn_stack_tmp,
                                               mic_in ) != SMTC_MODEM_CRYPTO_RC_SUCCESS )
             {
+                if( stale_fcnt_dwn_candidate )
+                {
+                    lr1_mac->fcnt_dwn_sync_pending = true;
+                }
                 status = ERRORLORAWAN;
             }
         }
@@ -990,6 +1005,7 @@ rx_packet_type_t lr1_stack_mac_rx_frame_decode( lr1_stack_mac_t* lr1_mac )
         lr1_mac->tx_ack_bit = tx_ack_bit;
 
         lr1_mac->fcnt_dwn                          = fcnt_dwn_stack_tmp;
+        lr1_mac->fcnt_dwn_sync_pending             = false;
         lr1_mac->adr_ack_cnt                       = 0;  // reset adr counter, receive a valid frame.
         lr1_mac->no_rx_packet_count_in_mobile_mode = 0;
         lr1_mac->no_rx_packet_count                = 0;

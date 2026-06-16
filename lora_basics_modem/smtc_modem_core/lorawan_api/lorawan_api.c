@@ -513,6 +513,16 @@ uint32_t lorawan_api_fcnt_up_get( void )
     return lr1mac_core_fcnt_up_get( &lr1_mac_obj );
 }
 
+uint32_t lorawan_api_fcnt_down_get( void )
+{
+    return lr1mac_core_fcnt_down_get( &lr1_mac_obj );
+}
+
+bool lorawan_api_fcnt_down_sync_pending_get( void )
+{
+    return lr1mac_core_fcnt_down_sync_pending_get( &lr1_mac_obj );
+}
+
 uint8_t lorawan_api_rp_hook_id_get( void )
 {
     uint8_t hook_id;

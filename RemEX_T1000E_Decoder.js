@@ -94,26 +94,54 @@ function decodeCrewPresenceCompact (bytes, payload, fPort) {
 }
 
 function decodeCrewHealthEvent (bytes, payload, fPort) {
-    if (bytes.length !== 5) {
-        return invalid(payload, fPort, 'Health/event payload must be 5 bytes')
+    if (bytes.length < 1) {
+        return invalid(payload, fPort, 'Health/event payload too short')
     }
 
     const schemaFamily = u8(bytes, 0)
     const schemaVersion = schemaVersionOf(schemaFamily)
+    const family = phaseOf(schemaFamily)
     if (schemaVersion !== 1) {
         return invalid(payload, fPort, `Unsupported health/event schema ${schemaVersion}`)
     }
 
     const decoded = baseDecoded(payload, fPort)
-    const healthEvent = {
-        schemaVersion,
-        family: phaseOf(schemaFamily),
-        familyName: healthEventFamilyName(phaseOf(schemaFamily)),
-        eventFlags: eventFlagsFromRaw(u8(bytes, 1)),
-        battery: s8(bytes, 2),
-        value1: u8(bytes, 3),
-        value2: u8(bytes, 4)
+    let healthEvent
+
+    if (family === 6) {
+        if (bytes.length !== 7) {
+            return invalid(payload, fPort, 'FCntDown sync payload must be 7 bytes')
+        }
+
+        const flagsRaw = u8(bytes, 1)
+        healthEvent = {
+            schemaVersion,
+            family,
+            familyName: healthEventFamilyName(family),
+            flagsRaw,
+            flags: {
+                syncPending: (flagsRaw & 0x01) !== 0,
+                staleDownlinkSeen: (flagsRaw & 0x02) !== 0
+            },
+            battery: s8(bytes, 2),
+            fcntDown: u32le(bytes, 3)
+        }
+    } else {
+        if (bytes.length !== 5) {
+            return invalid(payload, fPort, 'Health/event payload must be 5 bytes')
+        }
+
+        healthEvent = {
+            schemaVersion,
+            family,
+            familyName: healthEventFamilyName(family),
+            eventFlags: eventFlagsFromRaw(u8(bytes, 1)),
+            battery: s8(bytes, 2),
+            value1: u8(bytes, 3),
+            value2: u8(bytes, 4)
+        }
     }
+
     decoded.messages.push(healthMeasurements(healthEvent))
     return decoded
 }
@@ -419,11 +447,16 @@ function presenceMeasurements (presence) {
 }
 
 function healthMeasurements (healthEvent) {
-    return [
-        measurement('4200', 'Event Status', healthEvent.eventFlags),
+    const measurements = [
         measurement('3000', 'Battery', healthEvent.battery),
         measurement('6003', 'Crew Health Event', healthEvent)
     ]
+
+    if (healthEvent.eventFlags !== undefined) {
+        measurements.unshift(measurement('4200', 'Event Status', healthEvent.eventFlags))
+    }
+
+    return measurements
 }
 
 function rfFingerprintMeasurements (fingerprint) {
@@ -507,6 +540,7 @@ function healthEventFamilyName (family) {
         case 3: return 'shock'
         case 4: return 'light'
         case 5: return 'temperature'
+        case 6: return 'FCntDown sync'
         default: return `reserved ${family}`
     }
 }
@@ -567,6 +601,13 @@ function i32le (bytes, offset) {
         (u8(bytes, offset + 2) << 16) |
         (u8(bytes, offset + 3) << 24))
     return value | 0
+}
+
+function u32le (bytes, offset) {
+    return (u8(bytes, offset) |
+        (u8(bytes, offset + 1) << 8) |
+        (u8(bytes, offset + 2) << 16) |
+        (u8(bytes, offset + 3) << 24)) >>> 0
 }
 
 if (typeof module !== 'undefined') {

@@ -34,6 +34,7 @@ FPort policy:
 - FPort 5 is routine crew-tag traffic and may be sampled by the relay shim.
 - FPort 6 is alert/pass-through traffic and must be forwarded by the relay shim without nth filtering.
 - FPort 7 is routine on-charge/spare crew-tag traffic and may use a separate nth filtering policy.
+- FPort 8 is low-rate health/event and maintenance traffic that should be preserved by the relay shim.
 - FPort 10 is reserved for gateway assistance downlinks.
 
 Routine FPort 5 traffic:
@@ -79,6 +80,7 @@ Gateway shim policy:
 - Allow FPort 5 with configured nth filtering for routine traffic.
 - Allow FPort 6 without nth filtering.
 - Allow FPort 7 with independently configured nth filtering for on-charge/spare routine traffic.
+- Allow FPort 8 without nth filtering, or with a strongly preserved low-rate policy.
 - Allow joins only from approved DevEUI prefixes where that policy is required by the deployment.
 - Default action may remain `drop` if the explicit allow rules above are present.
 
@@ -94,6 +96,7 @@ Gateway shim policy:
 
 - FPort 5 sampling means the backend may not see every routine telemetry frame.
 - FPort 7 filtering means the backend may not see every spare/on-charge telemetry frame.
+- FPort 8 delivery depends on the relay shim and backend being updated before maintenance sync payloads rely on it.
 - FPort 6 must be protected from accidental use by routine payloads.
 - DevEUI-derived jitter can delay first routine status visibility by the configured maximum.
 - LinkCheckReq behavior still depends on the LoRaWAN modem and LNS handling of MAC-only traffic.
@@ -111,6 +114,7 @@ Gateway shim policy:
 - [[MDR-012: BLE Hint and LinkCheck Based Crew Tag DR Strategy]]
 - [[MDR-020: Crew Tag Geolocation Method Order and WiFi Presence Detection]]
 - [[MDR-019: Crew Tag Charger State Routing and POB Counting]]
+- [[MDR-023: LNS FCntDown Synchronization for Crew Tags]]
 - `UPLINK_PAYLOADS.md`
 - `t1000_e/tracker/inc/crew_lorawan_ports.h`
 

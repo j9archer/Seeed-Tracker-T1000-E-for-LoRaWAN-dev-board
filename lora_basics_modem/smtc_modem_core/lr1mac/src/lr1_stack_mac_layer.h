@@ -104,6 +104,7 @@ typedef struct lr1_stack_mac_s
     /********************************************/
     uint32_t                 fcnt_up;
     uint32_t                 fcnt_dwn;
+    bool                     fcnt_dwn_sync_pending;
     uint32_t                 dev_addr;
     lr1mac_activation_mode_t activation_mode;
 

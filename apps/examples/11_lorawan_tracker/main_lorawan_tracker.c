@@ -12,6 +12,7 @@
 #include "smtc_modem_api.h"
 #include "smtc_modem_middleware_advanced_api.h"
 #include "smtc_modem_hal.h"
+#include "lorawan_api.h"
 #include "device_management_defs.h"
 #include "smtc_board_ralf.h"
 #include "apps_utilities.h"
@@ -58,6 +59,7 @@
 #define CREW_SOS_CONTEXT_SUBTYPE    0x23
 #define CREW_SOS_CONTEXT_SCHEMA     0x10
 #define STARTUP_SERIAL_DELAY_MS     5000
+#define CREW_FCNT_DOWN_SYNC_RETRY_S 60
 
 /* Fleet de-synchronisation windows. All are deterministic per DevEUI, so a tag keeps
  * the same phase across reboots while the fleet is spread across the available window.
@@ -325,9 +327,12 @@ static bool app_tracker_payload_is_sos_context( const uint8_t* buffer, uint8_t l
 static bool app_tracker_send_compact_presence( uint8_t outgoing_event_state, int8_t battery, bool confirm );
 static bool app_tracker_send_gnss_proof( uint8_t outgoing_event_state, int8_t battery, bool confirm );
 static bool app_tracker_send_sos_context( uint8_t outgoing_event_state, int8_t battery, bool confirm );
+static bool app_tracker_send_fcnt_down_sync( uint8_t outgoing_event_state, int8_t battery );
+static void app_tracker_maybe_send_fcnt_down_sync( uint8_t outgoing_event_state, int8_t battery );
 static void app_tracker_sos_gnss_prestart( void );
 static uint32_t app_tracker_gnss_next_delay( void );
 static void app_tracker_u16_le( uint8_t* buffer, uint16_t value );
+static void app_tracker_u32_le( uint8_t* buffer, uint32_t value );
 static void app_tracker_i32_le( uint8_t* buffer, int32_t value );
 
 /*!
@@ -2001,6 +2006,11 @@ static void app_tracker_scan_result_send( void )
 
     crew_dr_after_vessel_uplink( send_ok );
 
+    if( send_ok && ( app_tracker_is_sos_event( ) == false ) )
+    {
+        app_tracker_maybe_send_fcnt_down_sync( outgoing_event_state, battery );
+    }
+
     if( send_ok ) scan_result_num -= 1;
     if( scan_result_num )
     {
@@ -2087,6 +2097,58 @@ static bool app_tracker_send_compact_presence( uint8_t outgoing_event_state, int
     return app_send_frame( payload, len, confirm, false );
 }
 
+static bool app_tracker_send_fcnt_down_sync( uint8_t outgoing_event_state, int8_t battery )
+{
+    static uint8_t payload[sizeof( crew_fcnt_down_sync_t )];
+    uint8_t        len       = 0;
+    uint32_t       fcnt_down = lorawan_api_fcnt_down_get( );
+
+    if( fcnt_down == 0xFFFFFFFF )
+    {
+        return false;
+    }
+
+    payload[len++] = CREW_PAYLOAD_SCHEMA_PHASE( CREW_PAYLOAD_SCHEMA_VERSION,
+                                                CREW_HEALTH_EVENT_FAMILY_FCNT_DOWN_SYNC );
+    payload[len++] = CREW_FCNT_DOWN_SYNC_FLAG_PENDING | CREW_FCNT_DOWN_SYNC_FLAG_STALE_SEEN;
+    payload[len++] = (uint8_t) battery;
+    app_tracker_u32_le( payload + len, fcnt_down );
+    len += 4;
+
+    if( crew_dr_ready )
+    {
+        crew_dr_prepare_next_uplink( crew_dr.vessel_current );
+    }
+
+    LOG_LORA( "Request FPort %u fCntDown sync: flags=0x%02x fCntDown=%lu\n",
+              CREW_HEALTH_EVENT_APP_PORT, payload[1], fcnt_down );
+
+    UNUSED( outgoing_event_state );
+    return app_send_frame_on_port_ext( CREW_HEALTH_EVENT_APP_PORT, payload, len, false, false, 1 );
+}
+
+static void app_tracker_maybe_send_fcnt_down_sync( uint8_t outgoing_event_state, int8_t battery )
+{
+    static uint32_t last_sync_uplink_s = 0;
+    uint32_t        now_s              = hal_rtc_get_time_s( );
+
+    if( lorawan_api_fcnt_down_sync_pending_get( ) == false )
+    {
+        last_sync_uplink_s = 0;
+        return;
+    }
+
+    if( ( last_sync_uplink_s != 0 ) && ( now_s - last_sync_uplink_s < CREW_FCNT_DOWN_SYNC_RETRY_S ) )
+    {
+        return;
+    }
+
+    if( app_tracker_send_fcnt_down_sync( outgoing_event_state, battery ) )
+    {
+        last_sync_uplink_s = now_s;
+    }
+}
+
 static bool app_tracker_send_gnss_proof( uint8_t outgoing_event_state, int8_t battery, bool confirm )
 {
     uint8_t payload[sizeof( crew_gnss_proof_t )] = { 0 };
@@ -2162,13 +2224,18 @@ static void app_tracker_u16_le( uint8_t* buffer, uint16_t value )
     buffer[1] = (uint8_t)(( value >> 8 ) & 0xFF );
 }
 
+static void app_tracker_u32_le( uint8_t* buffer, uint32_t value )
+{
+    buffer[0] = (uint8_t)( value & 0xFF );
+    buffer[1] = (uint8_t)(( value >> 8 ) & 0xFF );
+    buffer[2] = (uint8_t)(( value >> 16 ) & 0xFF );
+    buffer[3] = (uint8_t)(( value >> 24 ) & 0xFF );
+}
+
 static void app_tracker_i32_le( uint8_t* buffer, int32_t value )
 {
     uint32_t raw = (uint32_t)value;
-    buffer[0] = (uint8_t)( raw & 0xFF );
-    buffer[1] = (uint8_t)(( raw >> 8 ) & 0xFF );
-    buffer[2] = (uint8_t)(( raw >> 16 ) & 0xFF );
-    buffer[3] = (uint8_t)(( raw >> 24 ) & 0xFF );
+    app_tracker_u32_le( buffer, raw );
 }
 
 static bool app_tracker_send_sos_context( uint8_t outgoing_event_state, int8_t battery, bool confirm )

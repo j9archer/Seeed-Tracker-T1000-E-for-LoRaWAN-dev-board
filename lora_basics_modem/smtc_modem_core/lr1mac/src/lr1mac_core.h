@@ -368,6 +368,23 @@ receive_win_t lr1mac_core_rx_window_get( lr1_stack_mac_t* lr1_mac_obj );
 uint32_t lr1mac_core_fcnt_up_get( lr1_stack_mac_t* lr1_mac_obj );
 
 /**
+ * @brief Get the current downlink frame counter
+ *
+ * @param lr1_mac_obj
+ * @return uint32_t Last accepted downlink frame counter
+ */
+uint32_t lr1mac_core_fcnt_down_get( lr1_stack_mac_t* lr1_mac_obj );
+
+/**
+ * @brief Get whether a stale downlink counter was suspected and sync is pending
+ *
+ * @param lr1_mac_obj
+ * @return true Counter sync should be sent to the active LNS
+ * @return false Counter sync is not pending
+ */
+bool lr1mac_core_fcnt_down_sync_pending_get( lr1_stack_mac_t* lr1_mac_obj );
+
+/**
  * @brief Get the next time in second when a join could be requested
  *
  * @param lr1_mac_obj

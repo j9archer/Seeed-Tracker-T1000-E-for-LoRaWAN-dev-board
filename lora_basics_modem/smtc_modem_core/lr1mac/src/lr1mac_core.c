@@ -813,6 +813,16 @@ uint32_t lr1mac_core_fcnt_up_get( lr1_stack_mac_t* lr1_mac_obj )
     return ( lr1_mac_obj->fcnt_up );
 }
 
+uint32_t lr1mac_core_fcnt_down_get( lr1_stack_mac_t* lr1_mac_obj )
+{
+    return ( lr1_mac_obj->fcnt_dwn );
+}
+
+bool lr1mac_core_fcnt_down_sync_pending_get( lr1_stack_mac_t* lr1_mac_obj )
+{
+    return ( lr1_mac_obj->fcnt_dwn_sync_pending );
+}
+
 uint32_t lr1mac_core_next_join_time_second_get( lr1_stack_mac_t* lr1_mac_obj )
 {
     return ( lr1_mac_obj->next_time_to_join_seconds );

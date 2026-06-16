@@ -14,6 +14,7 @@ Routine startup/status traffic is FPort 5 when active and FPort 7 when on charge
 | 5 | Uplink | Routine tracker traffic, including on-board BLE/WiFi/GNSS telemetry | nth filtering allowed |
 | 6 | Uplink | Alert/pass-through traffic: uncertain, MOB/PIW, SOS, and event-bearing custom payloads | Forward every uplink |
 | 7 | Uplink | Routine on-charge/spare tracker traffic | Independent nth filtering allowed |
+| 8 | Uplink | Low-rate health/event and maintenance traffic, including `FCntDown` sync | Forward every uplink or strongly preserve |
 | 10 | Downlink | Gateway/vessel position assistance | Downlink only |
 
 Routine/control scheduling uses deterministic DevEUI-derived jitter or phase where useful:
@@ -42,6 +43,15 @@ Routine/control scheduling uses deterministic DevEUI-derived jitter or phase whe
 On FPort 6, Data IDs `0x20`, `0x21`, and `0x22` are decoded using the custom alert/MOB layout below rather than the routine FPort 5 layouts.
 
 Routine FPort 5 and FPort 7 payloads append one final `Location Age` byte after the payload-specific fields. This is the MDR-018/MDR-019 confirmation signal for accepted GNSS or gateway/vessel assistance position. Alert FPort 6 payloads do not include this field because their location is carried directly by GNSS state when available.
+
+FPort 8 health/event payload family `0x6` carries `FCntDown` sync after suspected stale downlink-counter failures:
+
+| Offset | Size | Field | Description |
+|--------|------|-------|-------------|
+| 0 | 1 | Schema + family | High nibble schema version, low nibble `0x6` |
+| 1 | 1 | Flags | Bit 0 sync pending, bit 1 stale downlink seen |
+| 2 | 1 | Battery | Battery percentage |
+| 3 | 4 | Device `FCntDown` | Last accepted downlink counter, uint32 little-endian |
 
 ---
 

@@ -228,6 +228,7 @@ Candidate health/event scheduling:
 - Shock/impact event: immediately or near-immediately, unfiltered, with optional compact magnitude/class.
 - Light event: on threshold crossing or state transition, not every routine uplink.
 - Temperature event: only if a product threshold or diagnostic requirement exists.
+- Downlink-counter sync: after a suspected stale `FCntDown` downlink failure, and then rate-limited until any valid downlink is accepted.
 
 Narrow battery-health schema, no subtype:
 
@@ -250,6 +251,17 @@ General event schema, used only if FPort 8 carries several event families:
 | 4 | 1 | Value 2 | Event-specific compact value or age |
 
 This is still smaller than carrying temperature, light, and accelerometer on every routine presence frame, and the FPort lets the shim preserve it.
+
+Downlink-counter sync schema, event family `6`:
+
+| Offset | Size | Field | Description |
+|--------|------|-------|-------------|
+| 0 | 1 | Schema + event family | High nibble schema version, low nibble `6` downlink-counter sync |
+| 1 | 1 | Flags | Bit 0 sync pending, bit 1 stale downlink seen, bits 2-7 reserved |
+| 2 | 1 | Battery | Battery percentage for context |
+| 3 | 4 | Device `FCntDown` | Last accepted device downlink counter, `uint32_t` little-endian |
+
+The active LNS must treat the reported counter as the device's last accepted downlink counter and update only upward. Its next downlink must use a counter greater than the reported value, then pending downlink queue entries should be flushed or regenerated. This schema is symmetric: it applies to Relay/Master and Master/Relay authority changes.
 
 ### FPort 6 CREW_UNCERTAIN_COMPACT
 
@@ -591,6 +603,7 @@ Decoder work should be staged after the compact payload contract is accepted:
 - [[MDR-018: Crew Tag FPort and Uplink Policy]]
 - [[MDR-019: Crew Tag Charger State Routing and POB Counting]]
 - [[MDR-020: Crew Tag Geolocation Method Order and WiFi Presence Detection]]
+- [[MDR-023: LNS FCntDown Synchronization for Crew Tags]]
 - `UPLINK_PAYLOADS.md`
 - `RemEX_T1000E_Decoder.js`
 - `apps/examples/11_lorawan_tracker/main_lorawan_tracker.c`

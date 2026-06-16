@@ -437,6 +437,21 @@ smtc_dtc_enablement_type_t lorawan_api_duty_cycle_enable_get( void );
 uint32_t lorawan_api_fcnt_up_get( void );
 
 /**
+ * @brief return the last accepted downlink frame counter
+ *
+ * @return uint32_t Last accepted downlink frame counter
+ */
+uint32_t lorawan_api_fcnt_down_get( void );
+
+/**
+ * @brief return whether the active LNS should be sent a downlink counter sync
+ *
+ * @return true Downlink counter sync is pending
+ * @return false Downlink counter sync is not pending
+ */
+bool lorawan_api_fcnt_down_sync_pending_get( void );
+
+/**
  * @brief Get the LoRaWAN radio planner hook ID
  *
  * @return uint8_t The used hook it

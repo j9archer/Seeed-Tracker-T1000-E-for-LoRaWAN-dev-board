@@ -72,6 +72,7 @@ typedef enum
     CREW_HEALTH_EVENT_FAMILY_SHOCK = 3,
     CREW_HEALTH_EVENT_FAMILY_LIGHT = 4,
     CREW_HEALTH_EVENT_FAMILY_TEMPERATURE = 5,
+    CREW_HEALTH_EVENT_FAMILY_FCNT_DOWN_SYNC = 6,
 } crew_health_event_family_t;
 
 typedef struct __attribute__( ( packed ) )
@@ -82,6 +83,17 @@ typedef struct __attribute__( ( packed ) )
     uint8_t value_1;
     uint8_t value_2;
 } crew_health_event_t;
+
+#define CREW_FCNT_DOWN_SYNC_FLAG_PENDING         0x01U
+#define CREW_FCNT_DOWN_SYNC_FLAG_STALE_SEEN      0x02U
+
+typedef struct __attribute__( ( packed ) )
+{
+    uint8_t  schema_family;
+    uint8_t  flags;
+    uint8_t  battery;
+    uint32_t fcnt_down;
+} crew_fcnt_down_sync_t;
 
 #define CREW_ALERT_SUBTYPE_MOB_POSITION          0x20U
 #define CREW_ALERT_SUBTYPE_MOB_CANCELLED         0x21U
